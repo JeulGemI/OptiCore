@@ -1,0 +1,37 @@
+# =====================================================================
+# OptiCore — Git 제외 목록
+# =====================================================================
+# ⚠️ 아래 두 파일은 절대 GitHub에 커밋하지 마세요.
+#    optimizer_settings.json  → Gemini API 키가 평문으로 저장됩니다
+#    optimizer_log.txt        → PC의 프로세스/경로 등 개인 정보가 남습니다
+#
+# 이미 실수로 커밋한 적이 있다면 파일을 지우는 것만으로는 부족합니다.
+# (git 히스토리에 그대로 남습니다) 반드시 Google AI Studio에서 해당 키를
+# 폐기(revoke)하고 새 키를 발급받으세요.
+# =====================================================================
+
+# 로컬 전용 사용자 데이터
+optimizer_settings.json
+optimizer_log.txt
+
+# 자동 업데이트가 남기는 임시/백업 파일
+*.bak
+*.new
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller 빌드 산출물
+build/
+dist/
+*.spec
+
+# 편집기 / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

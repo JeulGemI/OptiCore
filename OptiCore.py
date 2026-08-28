@@ -34,7 +34,7 @@
  OptiCore - 스마트 시스템 최적화 프로그램
  제작자 및 관리자: JeulGemI
  공동 협업자: KRJohnWick
- 현재 버전: v1.1.0
+ 현재 버전: v1.2.0
 =====================================================================
  [파일명 규칙]
    실제 파일명은 항상 "OptiCore.py"로 고정합니다. 버전이 올라가도
@@ -56,9 +56,48 @@
    함께 갱신합니다. 변경 이력은 최신 버전이 맨 위로 오도록 추가하고,
    너무 길어지면 오래된 항목은 요약합니다.
 
+   [미완료 접미사 규칙] 사용자가 한 번에 요청한 업데이트 사항들을 전부 구현하지
+   못하고 일부만 반영한 채로 버전을 올려야 할 때는, 다음 정식 버전 번호 뒤에
+   그리스 문자 발음을 소문자 언더스코어로 붙입니다: _alpha, _beta, _gamma,
+   _delta ... 순서로 사용합니다.
+     예) 1.3.4_alpha, 2.5.10_beta
+   이후 나머지 요청 사항까지 전부 완료되면, 접미사를 뗀 정식 버전 번호로
+   갱신합니다 (숫자 자체는 올리지 않음). 예) 1.3.4_alpha -> 1.3.4
+   같은 정식 버전 번호에서 미완료 상태가 반복되면 접미사만 다음 그리스 문자로
+   바꿉니다 (예: 1.3.4_alpha -> 1.3.4_beta), 번호 자체는 바꾸지 않습니다.
+   is_newer_version() 함수는 숫자가 같을 때 접미사 없는 정식판을 접미사가
+   붙은 버전보다 더 최신으로 판단하므로, 이 규칙을 그대로 따르면 자동
+   업데이트 확인 기능과도 어긋나지 않습니다.
+
  [배포 안내]
    이 프로그램은 GitHub 저장소 "OptiCore"에서 .exe로 빌드되어 배포됩니다.
    Claude가 수정한 OptiCore.py는 사용자가 이후 GitHub에 반영합니다.
+
+ =====================================================================
+ [AI 연동 예정 메모 — 다른 Claude 세션은 이 섹션을 읽고 참고할 것]
+ =====================================================================
+ 상태: 이 메모 자체는 v1.2.0에서 작성 완료. 실제 Gemini API 연동 코드는
+   아직 없음 — 아래 내용은 협업자가 연동을 시작할 때 참고할 자료입니다.
+ 요청 배경: 사용자가 "🚀 원클릭 최적화"를 실행할 때, 선택한 항목들이
+   지금 이 PC 상황에서 실제로 필요한 최적화인지(필수 기능 여부 등) AI가
+   확인/조언해주는 기능을 추가하고 싶어함.
+ 사용 예정 API: Google Gemini API.
+ 담당: 실제 API 키 발급/연동 코드 작성은 공동 협업자(KRJohnWick)가 진행할
+   예정. Claude는 이 메모를 참고용으로만 남겨두고, 사용자가 명시적으로
+   "이제 Gemini 연동을 구현해줘" 같은 요청을 하기 전까지는 API 키 처리나
+   실제 네트워크 호출 코드를 먼저 만들지 않는다 (협업자의 작업 범위를
+   임의로 침범하지 않기 위함).
+ 참고할 통합 지점(추정, 실제 구현 시 재검토 필요):
+   - MainWindow.on_start_clicked() 부근 — 사전 점검(precheck) 단계에서
+     체크된 항목을 Gemini에 보내 "필수/권장/불필요" 같은 판단을 받아오는
+     흐름이 자연스러울 것으로 보임.
+   - 기존 UpdateCheckThread/UpdateApplyThread 처럼, AI 응답 대기도 반드시
+     QThread로 분리해 UI가 멈추지 않도록 할 것 (이 파일의 기존 관례).
+   - API 키는 절대 소스에 하드코딩하지 말 것 (평문 커밋 시 GitHub에 그대로
+     노출됨). 환경 변수 또는 로컬 설정 파일(예: optimizer_settings.json에
+     사용자가 직접 입력하는 방식) 등 협업자와 상의해서 결정 필요.
+ 실제 Gemini API 연동(코드 구현)이 완료되면, 그 시점 버전의 변경 이력에
+   구현 내용을 기록하고 이 메모 섹션은 삭제하거나 실제 구현 설명으로 교체할 것.
 
  [필요 라이브러리 설치]
    pip install PyQt6 psutil Send2Trash
@@ -67,6 +106,32 @@
  =====================================================================
  [변경 이력]
  =====================================================================
+ v1.2.0 (UI 편의성 개편 + 도움말 + 자동 업데이트 + AI 연동 메모 + 최종 점검)
+   - [기능 설명] 모든 탭의 체크박스/버튼에 상세 설명 툴팁(setToolTip) 추가.
+   - [설정 탭 개편] 순서를 테마 선택 → 도움말 → 프로그램 정보로 재배치.
+     "업데이트 내역"을 프로그램 정보 안 버튼(스크롤 가능한 640x560 팝업)으로 통합.
+     새로 "❓ 도움말" 버튼 추가: get_help_text()로 탭별 기능을 자세히 설명.
+   - [자동 업데이트] GitHub 최신 릴리스를 조회해 새 버전이 있으면 물어보고
+     내려받아 실행 파일 자체를 같은 경로/이름으로 교체하는 기능 추가
+     (UpdateCheckThread/UpdateApplyThread, urllib만 사용해 추가 의존성 없음).
+     .py 다운로드분은 교체 전 compile()로 문법 검증, 교체 전 .bak 백업 생성.
+     시작 3초 후 자동 확인(설정에서 끌 수 있음) + 설정 탭 수동 확인 버튼 제공.
+     GITHUB_OWNER/GITHUB_REPO 상수는 임시값이므로 실제 저장소로 교체 필요.
+   - [버그 수정] _on_update_apply_result()에 잘못 남아있던 return tab 구문
+     제거. 정의되지 않은 tab 변수를 반환하려다 업데이트 적용 완료/재시작
+     확인 직후 NameError로 죽는 결함이었음 (최종 점검 중 발견).
+   - [버전 규칙 추가] 요청받은 업데이트를 한 번에 다 구현하지 못했을 때 붙이는
+     그리스 문자 접미사 규칙(_alpha, _beta, ...)을 [버전 표기 규칙]에 명문화.
+   - [AI 연동 예정 메모] Gemini API 연동은 공동 협업자(KRJohnWick)가 진행할
+     예정이라 실제 구현은 하지 않되, 요청대로 목적/사용 API/담당/통합 지점
+     후보를 정리한 "[AI 연동 예정 메모]" 섹션을 헤더에 추가해 다른 Claude
+     세션이 참고할 수 있게 함 (실제 코드 없음, 순수 메모 — 이 항목의 요청
+     자체가 "메모 작성"이었으므로 이것으로 완료 처리).
+   - [최종 점검] 위 변경 사항 전체에 대해 중복 정의/미정의 심볼/컴파일 여부를
+     재검사하고, changelog 자동 추출 로직(get_changelog_text)이 새로 추가된
+     AI 연동 메모 섹션과 충돌하지 않는지 확인함.
+   - 요청받은 사항(1~6번)을 모두 완료하여 접미사 없는 정식 버전 v1.2.0으로 확정.
+
  v1.1.0 (UI 경로 개편 + 설정 탭 신설)
    - 상단 탭 배치를 일관성 있게 재정렬: 최적화 관련 기능(원클릭 최적화 → 성능
      대시보드 → 성능&게이밍 → 블로트웨어 제거 → 시작 프로그램 → 디스크 정리+ →
@@ -134,6 +199,8 @@ import ctypes
 import platform
 import tempfile
 import subprocess
+import urllib.request
+import urllib.error
 from datetime import datetime
 
 import psutil
@@ -144,7 +211,15 @@ import psutil
 # 파일 최상단 주석의 [변경 이력]에서만 관리합니다.
 # (다른 Claude 계정/세션에서 이 파일을 이어받아 작업할 때도 이 상수를 갱신 기준으로 삼으세요.)
 APP_NAME = "OptiCore"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
+
+# [v1.2.0_alpha] 자동 업데이트 확인용 GitHub 저장소 정보.
+# 공동 협업자(KRJohnWick)가 실제 저장소 계정/이름으로 값을 맞춰주세요.
+# releases에 "OptiCore.py"(소스 실행용) 또는 "OptiCore.exe"(빌드본) 에셋을
+# 올려두면 아래 자동 업데이트 기능이 해당 파일을 찾아 내려받습니다.
+GITHUB_OWNER = "JeulGemI"
+GITHUB_REPO = "OptiCore"
+GITHUB_API_LATEST_RELEASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 
 try:
     from send2trash import send2trash
@@ -213,6 +288,7 @@ DEFAULT_SETTINGS = {
     },
     "nagle_disabled": False,  # 마지막으로 적용한 Nagle 설정 상태 (참고용 기록)
     "theme": "purple",  # 현재 적용 중인 테마 키 (THEMES 딕셔너리 참고)
+    "auto_check_update": True,  # 프로그램 시작 시 자동으로 새 버전 확인 여부
 }
 
 
@@ -260,6 +336,225 @@ def get_changelog_text() -> str:
         return changelog.strip("\n")
     except IndexError:
         return "변경 이력을 불러올 수 없습니다."
+
+
+# =====================================================================
+# [v1.2.0_alpha] 자동 업데이트 기능
+# =====================================================================
+# 배포된 .exe(또는 이 .py 파일 그대로)가 실행되는 동안, GitHub의 최신 릴리스와
+# 버전을 비교해 새 버전이 있으면 물어보고 자동으로 내려받아 "같은 경로/같은
+# 파일명"으로 교체합니다. 브라우저로 직접 재다운로드할 때 생기는
+# "OptiCore(1).exe" 같은 이름 중복 문제를 피할 수 있습니다.
+# 실제 반영은 프로그램을 다시 시작해야 적용됩니다 (재시작 여부는 사용자에게 확인).
+
+def _parse_version_tuple(version_str: str):
+    """'1.2.0_alpha' -> ((1, 2, 0), 'alpha') 형태로 분리한다."""
+    base, _, suffix = (version_str or "").partition("_")
+    try:
+        parts = tuple(int(p) for p in base.split("."))
+    except ValueError:
+        parts = (0, 0, 0)
+    return parts, suffix
+
+
+def is_newer_version(remote_version: str, local_version: str) -> bool:
+    """remote_version이 local_version보다 최신인지 판단한다.
+    숫자(MAJOR.MINOR.PATCH)가 더 크면 최신이고, 숫자가 같다면 접미사가 없는
+    정식판이 접미사(_alpha 등)가 붙은 버전보다 더 최신인 것으로 취급한다."""
+    r_parts, r_suffix = _parse_version_tuple(remote_version)
+    l_parts, l_suffix = _parse_version_tuple(local_version)
+    if r_parts != l_parts:
+        return r_parts > l_parts
+    return (not r_suffix) and bool(l_suffix)
+
+
+def get_running_program_path() -> str:
+    """현재 실행 중인 프로그램 자기 자신의 실제 경로.
+    PyInstaller 등으로 빌드된 .exe라면 그 exe 경로, 아니라면 이 .py 파일 경로."""
+    if getattr(sys, "frozen", False):
+        return sys.executable
+    return os.path.abspath(__file__)
+
+
+def check_latest_release():
+    """GitHub 최신 릴리스 정보를 조회한다. 실패해도 예외를 던지지 않고 (False, 사유)를 반환."""
+    try:
+        req = urllib.request.Request(
+            GITHUB_API_LATEST_RELEASE,
+            headers={"User-Agent": "OptiCore-UpdateChecker", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        tag = (data.get("tag_name") or "").lstrip("vV")
+        return True, {
+            "version": tag,
+            "assets": data.get("assets", []) or [],
+            "html_url": data.get("html_url", ""),
+            "notes": data.get("body", "") or "",
+        }
+    except Exception as e:
+        return False, str(e)
+
+
+def pick_update_asset(assets: list):
+    """실행 형태(exe/py)에 맞는 다운로드 URL을 릴리스 에셋 목록에서 찾는다."""
+    is_frozen = getattr(sys, "frozen", False)
+    preferred_ext = ".exe" if is_frozen else ".py"
+    for asset in assets:
+        name = (asset.get("name") or "").lower()
+        if name.endswith(preferred_ext):
+            return asset.get("browser_download_url")
+    return None
+
+
+def download_and_apply_update(download_url: str, target_path: str):
+    """
+    새 버전 파일을 내려받아 실행 중인 파일 자체를 안전하게 교체한다.
+    - .py 파일이면 교체 전에 문법 검증(compile)까지 수행해 손상된 파일로
+      바뀌는 사고를 방지한다.
+    - 교체 직전 기존 파일을 .bak으로 백업해두어 문제가 생기면 수동 복구가 가능하다.
+    """
+    try:
+        req = urllib.request.Request(
+            download_url, headers={"User-Agent": "OptiCore-UpdateChecker"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            new_content = resp.read()
+        if not new_content:
+            return False, "다운로드한 내용이 비어 있습니다."
+
+        if target_path.lower().endswith(".py"):
+            try:
+                compile(new_content.decode("utf-8", errors="ignore"), target_path, "exec")
+            except SyntaxError as e:
+                return False, f"다운로드한 파일이 손상되었을 수 있습니다 (문법 오류: {e})"
+
+        tmp_path = target_path + ".new"
+        with open(tmp_path, "wb") as f:
+            f.write(new_content)
+
+        backup_path = target_path + ".bak"
+        try:
+            if os.path.exists(target_path):
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                os.replace(target_path, backup_path)
+        except Exception:
+            pass  # 백업 실패는 치명적이지 않으므로 무시하고 계속 진행
+
+        os.replace(tmp_path, target_path)
+        write_log(f"자동 업데이트 적용 완료: {target_path}")
+        return True, "새 버전을 내려받아 적용했습니다. 프로그램을 다시 시작해주세요."
+    except Exception as e:
+        return False, str(e)
+
+
+def get_help_text() -> str:
+    """[v1.2.0_alpha] 설정 탭 '도움말'에 표시할, 탭/기능별 상세 설명 텍스트.
+    새 탭이나 기능을 추가할 때는 이 함수도 함께 갱신하세요."""
+    return """\
+OptiCore 기능 도움말
+=====================================================================
+이 화면은 프로그램의 각 탭에 있는 기능이 실제로 무엇을 하는지 자세히
+설명합니다. 잘 모르는 기능은 켜기 전에 이 글을 먼저 읽어보세요.
+
+---------------------------------------------------------------------
+🚀 원클릭 최적화
+---------------------------------------------------------------------
+· CPU (우선순위 조정): 백그라운드에서 CPU를 많이 쓰는 프로세스의 '우선순위'만
+  낮춥니다. 프로세스를 끄지 않으므로 안전하고, 되돌리기가 가능합니다.
+· GPU (정보 조회만): VRAM 사용량을 읽기만 합니다. 아무 것도 변경하지 않습니다.
+· RAM (워킹셋 트림): 프로세스가 안 쓰면서 붙잡고 있는 메모리를 반납시킵니다.
+· SSD / 브라우저 캐시: 임시 파일을 '휴지통'으로 이동합니다(복구 가능, 영구
+  삭제 아님).
+· DNS 캐시 초기화: 저장된 사이트 주소 기록을 지웁니다. 위험 없는 작업입니다.
+· 최적화 강도(1~3단계): 숫자가 높을수록 더 많은 프로세스/파일을 대상으로
+  삼습니다. CPU 우선순위 조정은 2단계부터 동작합니다.
+· 게임 부스터: 감시할 게임을 고르면, 감시 시작 시 그 게임의 우선순위를
+  올리고 다른 백그라운드 프로그램은 낮춥니다. 게임 종료가 감지되면 자동으로
+  원래대로 되돌립니다.
+· 자동 스마트 정리: 유휴 시간(자리 비움) 또는 RAM 사용률이 기준을 넘으면
+  팝업 없이 조용히 RAM 정리를 실행합니다.
+
+---------------------------------------------------------------------
+📊 성능 대시보드
+---------------------------------------------------------------------
+· 최적화를 실행한 뒤 실제로 확보된 RAM/CPU/디스크 수치를 보여줍니다.
+· "CPU 우선순위 전체 원복": 지금까지 낮춰둔 모든 프로세스 우선순위를 한 번에
+  정상으로 되돌립니다.
+· "로그 보기": 프로그램이 실제로 수행한 모든 조치의 기록(시간/대상)을 봅니다.
+· "휴지통 열기": 정리된 파일들이 이동된 휴지통을 바로 엽니다.
+
+---------------------------------------------------------------------
+🎮 성능 & 게이밍 (모두 관리자 권한 필요)
+---------------------------------------------------------------------
+· 네트워크/CPU 게임 우선 배정: Windows가 멀티미디어(게임)에 자원을 더
+  우선적으로 배분하도록 레지스트리를 조정합니다.
+· 고해상도 타이머: 입력 지연을 줄이는 데 도움 될 수 있는 부팅 설정입니다.
+  재부팅 후에만 실제로 적용/해제됩니다.
+· 포그라운드 앱 우선 CPU 스케줄링: 지금 화면에서 쓰고 있는 프로그램에
+  CPU 시간을 더 많이 배정합니다.
+· 시각 효과 최소화: 창 애니메이션/그림자 등을 꺼서 그래픽 자원을 아낍니다.
+· Game DVR 비활성화: Xbox Game Bar의 백그라운드 녹화 기능을 끕니다.
+· '최고의 성능' 전원 옵션: Windows에 숨겨진 전원 관리 옵션을 만들어
+  적용합니다. 데스크톱에 권장하며, 노트북은 발열/배터리에 유의하세요.
+
+---------------------------------------------------------------------
+🧹 블로트웨어 제거
+---------------------------------------------------------------------
+· Windows 기본 탑재 앱(Cortana, Xbox 오버레이 등) 중 안전 목록에 있는
+  것만 골라 제거합니다. 제거 후 Microsoft Store에서 재설치할 수 있습니다.
+· 텔레메트리 차단: Microsoft로 전송되는 사용정보 수집 서비스를 끕니다.
+  Windows 업데이트 자체는 계속 정상적으로 동작합니다.
+
+---------------------------------------------------------------------
+🗂 시작 프로그램
+---------------------------------------------------------------------
+· Windows 시작 시 자동으로 켜지는 프로그램 목록을 보여줍니다.
+· 활성/비활성 전환은 언제든 되돌릴 수 있어 삭제보다 안전합니다.
+· 삭제는 자동 실행 등록만 지우며, 프로그램 파일 자체는 지우지 않습니다.
+
+---------------------------------------------------------------------
+🧽 디스크 정리+
+---------------------------------------------------------------------
+· Windows Update 캐시: 이미 설치된 업데이트의 다운로드 잔여 파일입니다
+  (필요하면 다시 받아지므로 지워도 안전).
+· Prefetch: 프로그램 실행 속도를 위한 캐시로, 지워도 자동 재생성됩니다.
+· Brave 캐시: Brave 브라우저의 임시 캐시 파일 (로그인 정보와 무관).
+
+---------------------------------------------------------------------
+🩺 진단 & 복원
+---------------------------------------------------------------------
+· sfc /scannow, DISM: Windows 공식 시스템 파일 검사/복구 도구를 관리자
+  권한 터미널에서 실행합니다.
+· 원클릭 순정 복원: 이 프로그램의 '성능&게이밍', '텔레메트리 차단',
+  'Nagle' 등에서 바꾼 레지스트리/서비스 설정을 모두 Windows 기본값으로
+  되돌립니다. (삭제한 앱이나 휴지통으로 이동한 파일은 대상이 아닙니다.)
+
+---------------------------------------------------------------------
+💡 전문가 팁 & 네트워크
+---------------------------------------------------------------------
+· NVIDIA 제어판 / 서비스 관리자 / 시작 앱 설정: Windows·드라이버의 공식
+  설정 화면을 바로가기로 열어줄 뿐, 이 프로그램이 직접 값을 바꾸지 않습니다.
+· Nagle 비활성화: 네트워크 패킷을 즉시 전송하도록 해 온라인 게임의 체감
+  핑을 낮추는 데 도움이 될 수 있습니다. (관리자 권한 필요)
+· 복구 지점 생성: 지금 상태를 스냅샷으로 저장해, 나중에 문제가 생기면
+  Windows 시스템 복원으로 되돌릴 수 있게 합니다.
+
+---------------------------------------------------------------------
+🛡 화이트리스트 관리
+---------------------------------------------------------------------
+· 여기에 등록한 프로그램(예: discord.exe)은 RAM 정리, CPU 우선순위 조정,
+  게임 부스터의 백그라운드 양보 대상에서 항상 제외됩니다.
+
+---------------------------------------------------------------------
+⚙️ 설정
+---------------------------------------------------------------------
+· 테마 선택: 프로그램 색상 테마를 바꿉니다. 즉시 적용되고 재실행해도 유지됩니다.
+· 도움말: 지금 보고 있는 이 화면입니다.
+· 프로그램 정보: 제작자/버전 정보, 업데이트 내역 보기, 새 버전 확인이
+  모두 여기에 모여 있습니다.
+"""
 
 
 def is_admin() -> bool:
@@ -974,6 +1269,7 @@ class PrecheckDialog(QDialog):
             dns_box = QGroupBox("네트워크")
             dns_layout = QVBoxLayout(dns_box)
             self.dns_checkbox = QCheckBox("DNS 캐시 초기화 (ipconfig /flushdns)")
+            self.dns_checkbox.setToolTip("저장된 DNS 조회 기록을 지웁니다. 시스템에 위험이 없는 안전한 작업입니다.")
             self.dns_checkbox.setChecked(True)
             dns_layout.addWidget(self.dns_checkbox)
             inner_layout.addWidget(dns_box)
@@ -1793,6 +2089,29 @@ class ExtraCleanRunThread(QThread):
         self.finished_report.emit(results)
 
 
+class UpdateCheckThread(QThread):
+    """[v1.2.0_alpha] GitHub 최신 릴리스 조회를 백그라운드에서 수행 (네트워크 지연으로 UI가 멈추지 않도록)."""
+    result_ready = pyqtSignal(bool, object)
+
+    def run(self):
+        ok, data = check_latest_release()
+        self.result_ready.emit(ok, data)
+
+
+class UpdateApplyThread(QThread):
+    """[v1.2.0_alpha] 새 버전 다운로드 + 파일 교체를 백그라운드에서 수행."""
+    result_ready = pyqtSignal(bool, str)
+
+    def __init__(self, download_url: str, target_path: str, parent=None):
+        super().__init__(parent)
+        self.download_url = download_url
+        self.target_path = target_path
+
+    def run(self):
+        ok, msg = download_and_apply_update(self.download_url, self.target_path)
+        self.result_ready.emit(ok, msg)
+
+
 # =====================================================================
 # 6. 탭 UI 빌더 (MainWindow에 믹스인으로 결합)
 # =====================================================================
@@ -1826,8 +2145,14 @@ class ExtendedFeaturesMixin:
 
         box = QGroupBox("🧹 Windows 기본 탑재 앱 제거")
         box_layout = QVBoxLayout(box)
-        box_layout.addWidget(QLabel("스캔 후 제거할 앱을 선택하세요. (삭제는 되돌릴 수 없습니다)"))
+        box_layout.addWidget(QLabel(
+            "스캔 후 제거할 앱을 선택하세요. 목록은 게임/작업에 보통 불필요한\n"
+            "안전 목록(Cortana, Xbox 오버레이, 당신의 휴대폰 등) 기준으로만 표시됩니다.\n"
+            "제거 후에도 Microsoft Store에서 다시 설치할 수 있지만, 이 프로그램에서\n"
+            "자동으로 되돌리는 기능은 없습니다."
+        ))
         self.debloat_list = QListWidget()
+        self.debloat_list.setToolTip("Ctrl/Shift 클릭으로 여러 개를 한 번에 선택할 수 있습니다.")
         self.debloat_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         box_layout.addWidget(self.debloat_list)
 
@@ -1857,8 +2182,14 @@ class ExtendedFeaturesMixin:
         tel_layout.addWidget(self.telemetry_status_label)
         tel_btn_row = QHBoxLayout()
         tel_off_btn = QPushButton("텔레메트리 차단")
+        tel_off_btn.setToolTip(
+            "Microsoft로 전송되는 사용정보 수집 서비스(DiagTrack, dmwappushservice)를 끄고,\n"
+            "관련 레지스트리 정책 값을 최소 수집으로 설정합니다. Windows 업데이트 자체는\n"
+            "계속 정상 동작합니다."
+        )
         tel_off_btn.clicked.connect(lambda: self.on_telemetry_toggle(True))
         tel_on_btn = QPushButton("기본값 복원")
+        tel_on_btn.setToolTip("차단했던 서비스와 레지스트리 값을 Windows 기본 상태로 되돌립니다.")
         tel_on_btn.setObjectName("secondaryButton")
         tel_on_btn.clicked.connect(lambda: self.on_telemetry_toggle(False))
         tel_btn_row.addWidget(tel_off_btn)
@@ -1947,11 +2278,17 @@ class ExtendedFeaturesMixin:
         scan_btn = QPushButton("스캔")
         scan_btn.clicked.connect(self.on_startup_scan)
         toggle_btn = QPushButton("활성/비활성 전환")
+        toggle_btn.setToolTip(
+            "선택한 항목이 Windows 시작 시 자동으로 실행될지 여부를 전환합니다.\n"
+            "삭제와 달리 언제든 다시 켤 수 있어 안전합니다."
+        )
         toggle_btn.clicked.connect(self.on_startup_toggle)
         delete_btn = QPushButton("삭제")
+        delete_btn.setToolTip("자동 실행 등록 자체를 영구히 제거합니다. 프로그램 파일은 삭제되지 않습니다.")
         delete_btn.setObjectName("secondaryButton")
         delete_btn.clicked.connect(self.on_startup_delete)
         open_btn = QPushButton("파일 위치 열기")
+        open_btn.setToolTip("선택한 항목이 실제로 실행하는 프로그램 파일의 위치를 탐색기로 엽니다.")
         open_btn.setObjectName("secondaryButton")
         open_btn.clicked.connect(self.on_startup_open_location)
         for b in (scan_btn, toggle_btn, delete_btn, open_btn):
@@ -2032,15 +2369,41 @@ class ExtendedFeaturesMixin:
         box_layout = QVBoxLayout(box)
 
         self.cb_net_priority = QCheckBox("네트워크/CPU 게임 우선 배정 (NetworkThrottlingIndex, SystemResponsiveness)")
+        self.cb_net_priority.setToolTip(
+            "Windows가 멀티미디어(게임 포함) 작업에 네트워크/CPU 자원을 더 우선적으로\n"
+            "배분하도록 레지스트리 값을 조정합니다. NetworkThrottlingIndex를 최대값으로,\n"
+            "SystemResponsiveness를 0으로 설정해 백그라운드 작업의 간섭을 줄입니다.\n"
+            "관리자 권한이 필요하며, 원클릭 순정 복원으로 되돌릴 수 있습니다."
+        )
         self.cb_high_res_timer = QCheckBox("고해상도 타이머 사용 (bcdedit, 재부팅 필요)")
+        self.cb_high_res_timer.setToolTip(
+            "Windows의 타이머 정밀도를 높여(useplatformclock 비활성화) 입력 지연을\n"
+            "줄이는 데 도움이 될 수 있는 설정입니다. 부팅 구성(BCD)을 변경하므로\n"
+            "적용/해제 모두 재부팅 후에 실제로 반영됩니다. 관리자 권한이 필요합니다."
+        )
         self.cb_priority_sep = QCheckBox("포그라운드 앱 우선 CPU 스케줄링 (Win32PrioritySeparation)")
+        self.cb_priority_sep.setToolTip(
+            "현재 화면에서 조작 중인(포그라운드) 프로그램에 CPU 시간을 더 길게\n"
+            "배정하도록 레지스트리 값을 조정합니다. 게임처럼 포그라운드에서 계속\n"
+            "실행되는 프로그램의 체감 반응성을 높이는 데 도움이 됩니다."
+        )
         self.cb_visual_fx = QCheckBox("시각 효과 최소화 (성능 우선)")
+        self.cb_visual_fx.setToolTip(
+            "창 애니메이션, 그림자, 투명 효과 등 화면을 꾸미는 시각 효과를 줄여\n"
+            "그래픽 자원을 절약합니다. '제어판 → 시스템 속성 → 성능 우선'과 동일한 효과이며\n"
+            "디자인이 단순해지는 대신 체감 반응 속도가 빨라질 수 있습니다."
+        )
         self.cb_game_dvr = QCheckBox("Game DVR 비활성화")
+        self.cb_game_dvr.setToolTip(
+            "Xbox Game Bar의 백그라운드 녹화 기능(Game DVR)을 끕니다.\n"
+            "게임 실행 중 자동 녹화로 인한 성능 저하와 오버레이 팝업을 방지합니다."
+        )
         for cb in (self.cb_net_priority, self.cb_high_res_timer, self.cb_priority_sep,
                    self.cb_visual_fx, self.cb_game_dvr):
             box_layout.addWidget(cb)
 
         apply_btn = QPushButton("선택 항목 일괄 적용")
+        apply_btn.setToolTip("체크한 항목들을 순서대로 적용합니다. 진행 중 오류가 나도 나머지 항목은 계속 시도합니다.")
         apply_btn.clicked.connect(self.on_apply_perf_tweaks)
         box_layout.addWidget(apply_btn)
 
@@ -2052,6 +2415,11 @@ class ExtendedFeaturesMixin:
         power_box = QGroupBox("⚡ 전원 옵션")
         power_layout = QVBoxLayout(power_box)
         power_btn = QPushButton("'최고의 성능' 전원 옵션 생성 및 적용")
+        power_btn.setToolTip(
+            "Windows에 기본적으로 숨겨져 있는 '최고의 성능(Ultimate Performance)'\n"
+            "전원 관리 옵션을 새로 만들어 활성화합니다. CPU 절전 기능을 최소화해\n"
+            "성능을 우선시하지만, 배터리 소모나 발열이 늘어날 수 있습니다 (데스크톱 권장)."
+        )
         power_btn.clicked.connect(self.on_create_ultimate_power_plan)
         power_layout.addWidget(power_btn)
         layout.addWidget(power_box)
@@ -2059,6 +2427,7 @@ class ExtendedFeaturesMixin:
         dns_box = QGroupBox("🌐 DNS 캐시")
         dns_layout = QVBoxLayout(dns_box)
         dns_btn = QPushButton("DNS 캐시 플러시 (ipconfig /flushdns)")
+        dns_btn.setToolTip("저장된 DNS 조회 기록을 지웁니다. 사이트 접속이 이상할 때 시도해볼 수 있는 안전한 작업입니다.")
         dns_btn.clicked.connect(self.on_flush_dns_perf_tab)
         dns_layout.addWidget(dns_btn)
         layout.addWidget(dns_box)
@@ -2134,8 +2503,17 @@ class ExtendedFeaturesMixin:
         box_layout = QVBoxLayout(box)
         box_layout.addWidget(QLabel("별도의 관리자 권한 터미널 창에서 안전하게 실행됩니다."))
         sfc_btn = QPushButton("sfc /scannow 실행")
+        sfc_btn.setToolTip(
+            "Windows 시스템 파일의 손상 여부를 검사하고 자동으로 복구를 시도하는\n"
+            "공식 명령어입니다. 새 관리자 권한 터미널 창에서 실행되며 수 분 정도 걸릴 수 있습니다."
+        )
         sfc_btn.clicked.connect(self.on_run_sfc)
         dism_btn = QPushButton("DISM 이미지 복구 실행")
+        dism_btn.setToolTip(
+            "Windows 구성 요소 저장소(이미지) 자체의 손상을 복구하는 공식 명령어입니다.\n"
+            "sfc로 해결되지 않는 심각한 시스템 파일 문제에 사용하며, 인터넷 연결이 필요할 수 있고\n"
+            "완료까지 10분 이상 걸릴 수 있습니다."
+        )
         dism_btn.clicked.connect(self.on_run_dism)
         box_layout.addWidget(sfc_btn)
         box_layout.addWidget(dism_btn)
@@ -2148,6 +2526,12 @@ class ExtendedFeaturesMixin:
             "(관리자 권한 필요)"
         ))
         restore_btn = QPushButton("모든 설정 순정 복원")
+        restore_btn.setToolTip(
+            "이 프로그램의 '성능&게이밍', '블로트웨어 제거'(텔레메트리),\n"
+            "네트워크(Nagle) 탭 등에서 변경한 레지스트리/서비스 설정을 모두\n"
+            "Windows 기본값으로 되돌립니다. 앱 삭제나 휴지통으로 이동한 파일은\n"
+            "복원 대상이 아닙니다 (Microsoft Store 재설치 / 휴지통 복구를 이용하세요)."
+        )
         restore_btn.setObjectName("secondaryButton")
         restore_btn.clicked.connect(self.on_restore_defaults)
         restore_layout.addWidget(restore_btn)
@@ -2194,7 +2578,11 @@ class ExtendedFeaturesMixin:
         layout = QVBoxLayout(tab)
         layout.addWidget(QLabel(
             "Windows Update 캐시 / Prefetch / Brave 캐시 등 추가 정리 대상을 스캔합니다.\n"
-            "Windows Update 캐시와 Prefetch는 관리자 권한이 필요합니다."
+            "Windows Update 캐시와 Prefetch는 관리자 권한이 필요합니다.\n"
+            "· Windows Update 캐시: 이미 설치된 업데이트의 다운로드 잔여 파일 (재다운로드 가능)\n"
+            "· Prefetch: 프로그램 실행 속도 향상을 위한 시스템 캐시 (삭제해도 자동 재생성됨,\n"
+            "  단 정리 직후 해당 프로그램의 첫 실행은 약간 느려질 수 있음)\n"
+            "· Brave 캐시: Brave 브라우저의 임시 캐시 파일 (로그인 정보와 무관)"
         ))
 
         self.extra_clean_list = QListWidget()
@@ -2326,6 +2714,12 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         tabs.addTab(self.build_tab_settings(), "⚙️ 설정")
 
         self._setup_tray_icon()
+
+        # [v1.2.0_alpha] 자동 업데이트 확인: 켜져 있으면 시작 3초 후 조용히 확인.
+        # (시작 직후 바로 네트워크 요청을 하면 다른 초기화와 겹쳐 체감 로딩이
+        #  느려 보일 수 있어 약간의 지연을 둠. 새 버전이 없으면 아무 팝업도 뜨지 않음.)
+        if self.settings.get("auto_check_update", True):
+            QTimer.singleShot(3000, lambda: self.on_check_update(manual=False))
 
     # -----------------------------------------------------------------
     # 트레이 아이콘 (창을 닫아도 고립되지 않도록)
@@ -2469,11 +2863,38 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         check_group = QGroupBox("최적화 대상 선택")
         check_layout = QGridLayout(check_group)
         self.cb_cpu = QCheckBox("CPU (우선순위 조정)")
+        self.cb_cpu.setToolTip(
+            "백그라운드에서 CPU를 많이 쓰는 프로세스의 '우선순위'만 낮춥니다.\n"
+            "프로세스를 종료하지 않으므로 안전하며, 원클릭 되돌리기가 가능합니다.\n"
+            "강도 2단계부터 동작합니다."
+        )
         self.cb_gpu = QCheckBox("GPU (정보 조회만)")
+        self.cb_gpu.setToolTip(
+            "GPU 메모리(VRAM) 사용량을 조회만 합니다. 설정을 바꾸거나 프로세스를\n"
+            "종료하지 않는 '읽기 전용' 항목입니다. NVIDIA GPU + pynvml 설치 시에만 동작합니다."
+        )
         self.cb_ram = QCheckBox("RAM (워킹셋 트림)")
+        self.cb_ram.setToolTip(
+            "각 프로세스가 실제로 쓰지 않으면서 붙잡고 있는 메모리(워킹셋)를\n"
+            "운영체제에 반납하도록 요청합니다. 프로세스는 종료되지 않으며,\n"
+            "필요하면 다시 자동으로 메모리를 할당받으므로 안전합니다."
+        )
         self.cb_ssd = QCheckBox("SSD (임시파일 → 휴지통)")
+        self.cb_ssd.setToolTip(
+            "Windows 임시 폴더(Temp)의 불필요한 캐시 파일을 정리합니다.\n"
+            "완전 삭제가 아니라 휴지통으로 이동하므로 필요하면 복구할 수 있습니다."
+        )
         self.cb_browser = QCheckBox("브라우저 캐시 (Chrome/Edge)")
+        self.cb_browser.setToolTip(
+            "Chrome/Edge 브라우저의 캐시 파일을 휴지통으로 이동합니다.\n"
+            "로그인 정보나 즐겨찾기에는 영향을 주지 않으며, 다음 접속 시 캐시가\n"
+            "다시 쌓이기 때문에 사이트 로딩이 잠깐 느려질 수 있습니다."
+        )
         self.cb_dns = QCheckBox("DNS 캐시 초기화")
+        self.cb_dns.setToolTip(
+            "'ipconfig /flushdns'와 동일한 동작으로, 저장된 DNS 조회 기록을 지웁니다.\n"
+            "잘못된 접속 정보가 캐시되어 있을 때 유용하며, 시스템에 위험이 없는 안전한 작업입니다."
+        )
         for i, cb in enumerate((self.cb_cpu, self.cb_gpu, self.cb_ram, self.cb_ssd, self.cb_browser, self.cb_dns)):
             cb.setChecked(True)
             check_layout.addWidget(cb, i // 2, i % 2)
@@ -2504,6 +2925,11 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         auto_group = QGroupBox("🕒 자동 스마트 정리 (백그라운드 무소음 실행)")
         auto_layout = QVBoxLayout(auto_group)
         self.auto_enable_cb = QCheckBox("유휴 시간 또는 RAM 사용률 초과 시 자동으로 조용히 정리")
+        self.auto_enable_cb.setToolTip(
+            "설정한 유휴 시간(키보드/마우스 조작이 없는 시간)이 지나거나, RAM 사용률이\n"
+            "설정한 임계값을 넘으면 팝업 없이 백그라운드에서 RAM 정리를 자동 실행합니다.\n"
+            "최소 10분 간격으로만 실행되어 너무 자주 동작하지 않습니다."
+        )
         self.auto_enable_cb.setChecked(self.settings["auto_schedule"]["enabled"])
         self.auto_enable_cb.stateChanged.connect(self.on_auto_settings_changed)
         auto_layout.addWidget(self.auto_enable_cb)
@@ -3002,6 +3428,7 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         b1 = QVBoxLayout(box1)
         b1.addWidget(QLabel("전원 관리: 최고 성능 선호 / 저지연 모드: 울트라 권장"))
         btn1 = QPushButton("NVIDIA 제어판 열기")
+        btn1.setToolTip("NVIDIA 그래픽 드라이버의 공식 설정 화면을 엽니다. 이 프로그램이 직접 설정을 바꾸지는 않습니다.")
         btn1.clicked.connect(lambda: os.system("start nvcplui.exe") if IS_WINDOWS else None)
         b1.addWidget(btn1)
         layout.addWidget(box1)
@@ -3010,6 +3437,7 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         b2 = QVBoxLayout(box2)
         b2.addWidget(QLabel("SysMain, DiagTrack 등은 필요시 수동으로 변경하세요."))
         btn2 = QPushButton("서비스 관리자 열기")
+        btn2.setToolTip("Windows 공식 서비스 관리 화면(services.msc)을 엽니다.")
         btn2.clicked.connect(lambda: os.system("start services.msc") if IS_WINDOWS else None)
         b2.addWidget(btn2)
         layout.addWidget(box2)
@@ -3018,6 +3446,10 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         b3 = QVBoxLayout(box3)
         b3.addWidget(QLabel("불필요한 시작 프로그램을 꺼서 부팅 시간을 줄이세요."))
         btn3 = QPushButton("시작 앱 설정 열기")
+        btn3.setToolTip(
+            "Windows 공식 시작 앱 설정 화면을 엽니다. 더 상세하게 관리하고 싶다면\n"
+            "'🗂 시작 프로그램' 탭에서 개별 항목을 켜고 끌 수 있습니다."
+        )
         btn3.clicked.connect(lambda: os.system("start ms-settings:startupapps") if IS_WINDOWS else None)
         b3.addWidget(btn3)
         layout.addWidget(box3)
@@ -3040,8 +3472,14 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
 
         net_btn_row = QHBoxLayout()
         nagle_off_btn = QPushButton("Nagle 비활성화 (핑 최적화)")
+        nagle_off_btn.setToolTip(
+            "네트워크 인터페이스 레지스트리에 TcpAckFrequency=1, TCPNoDelay=1을 설정해\n"
+            "작은 패킷을 모았다가 보내지 않고 즉시 전송하게 합니다. 온라인 게임의\n"
+            "체감 핑을 낮추는 데 도움이 될 수 있습니다."
+        )
         nagle_off_btn.clicked.connect(lambda: self.on_nagle_toggle(True))
         nagle_on_btn = QPushButton("기본값으로 복원")
+        nagle_on_btn.setToolTip("추가했던 레지스트리 값을 삭제해 Windows 기본 네트워크 동작으로 되돌립니다.")
         nagle_on_btn.setObjectName("secondaryButton")
         nagle_on_btn.clicked.connect(lambda: self.on_nagle_toggle(False))
         net_btn_row.addWidget(nagle_off_btn)
@@ -3057,6 +3495,10 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
             "(Windows는 기본적으로 24시간에 1번만 생성을 허용합니다. 관리자 권한 필요)"
         ))
         restore_btn = QPushButton("지금 복구 지점 만들기")
+        restore_btn.setToolTip(
+            "지금 시점의 시스템 설정을 스냅샷으로 저장합니다. 이후 다른 최적화나 튜닝이\n"
+            "문제를 일으켰을 때 '이 시점으로 되돌리기'(Windows 시스템 복원)로 복구할 수 있습니다."
+        )
         restore_btn.clicked.connect(self.on_create_restore_point)
         restore_layout.addWidget(restore_btn)
         layout.addWidget(restore_box)
@@ -3183,7 +3625,7 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         save_settings(self.settings)
 
     # -----------------------------------------------------------------
-    # Tab: 설정 (테마 · 프로그램 정보 · 업데이트 내역)
+    # Tab: 설정 (테마 → 도움말 → 프로그램 정보)
     # -----------------------------------------------------------------
     def build_tab_settings(self):
         tab = QWidget()
@@ -3192,7 +3634,7 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
 
-        # ---- 테마 선택 ----
+        # ---- 1) 테마 선택 ----
         theme_box = QGroupBox("🎨 테마 선택")
         theme_layout = QVBoxLayout(theme_box)
         theme_layout.addWidget(QLabel("원하는 색상 테마를 선택하세요. 즉시 적용되고 다음 실행 시에도 유지됩니다."))
@@ -3208,29 +3650,157 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         theme_layout.addWidget(self.theme_combo)
         layout.addWidget(theme_box)
 
-        # ---- 프로그램 정보 ----
+        # ---- 2) 도움말 ----
+        help_box = QGroupBox("❓ 도움말")
+        help_layout = QVBoxLayout(help_box)
+        help_layout.addWidget(QLabel("각 탭의 기능이 정확히 무엇을 하는지 잘 모르겠다면 아래 버튼을 눌러보세요."))
+        help_btn = QPushButton("기능 설명 전체 보기")
+        help_btn.clicked.connect(self.on_show_help)
+        help_layout.addWidget(help_btn)
+        layout.addWidget(help_box)
+
+        # ---- 3) 프로그램 정보 (제작자/버전 + 업데이트 내역 + 업데이트 확인) ----
         info_box = QGroupBox("ℹ️ 프로그램 정보")
         info_layout = QVBoxLayout(info_box)
         info_layout.addWidget(QLabel(f"{APP_NAME} v{APP_VERSION}"))
         info_layout.addWidget(QLabel("제작자 및 관리자: JeulGemI"))
         info_layout.addWidget(QLabel("공동 협업자: KRJohnWick"))
-        layout.addWidget(info_box)
 
-        # ---- 업데이트 내역 ----
-        changelog_box = QGroupBox("📜 업데이트 내역")
-        changelog_layout = QVBoxLayout(changelog_box)
-        changelog_view = QTextEdit()
-        changelog_view.setReadOnly(True)
-        changelog_view.setMinimumHeight(260)
-        changelog_view.setPlainText(get_changelog_text())
-        changelog_layout.addWidget(changelog_view)
-        layout.addWidget(changelog_box)
+        changelog_btn = QPushButton("📜 업데이트 내역 보기")
+        changelog_btn.clicked.connect(self.on_show_changelog)
+        info_layout.addWidget(changelog_btn)
+
+        info_layout.addWidget(QFrame())  # 시각적 구분용 얇은 여백
+
+        self.auto_update_cb = QCheckBox("프로그램 시작 시 자동으로 새 버전 확인")
+        self.auto_update_cb.setToolTip("체크해두면 프로그램을 켤 때마다 조용히 GitHub에서 새 버전이 있는지 확인합니다.")
+        self.auto_update_cb.setChecked(self.settings.get("auto_check_update", True))
+        self.auto_update_cb.stateChanged.connect(self.on_auto_update_setting_changed)
+        info_layout.addWidget(self.auto_update_cb)
+
+        self.update_status_label = QLabel("업데이트 상태: 아직 확인하지 않음")
+        self.update_status_label.setStyleSheet("color:#9a9ab0;")
+        info_layout.addWidget(self.update_status_label)
+
+        update_btn = QPushButton("🔄 지금 업데이트 확인")
+        update_btn.setToolTip(
+            "GitHub의 최신 릴리스와 현재 버전을 비교합니다.\n"
+            "새 버전이 있으면 내려받아 지금 실행 중인 파일 자체를 같은 이름으로 교체할지 물어봅니다\n"
+            "(브라우저로 다시 받을 때 생기는 'OptiCore(1)' 같은 이름 중복이 생기지 않습니다)."
+        )
+        update_btn.clicked.connect(lambda: self.on_check_update(manual=True))
+        info_layout.addWidget(update_btn)
+
+        layout.addWidget(info_box)
 
         layout.addStretch()
         outer_scroll.setWidget(content)
         outer_layout = QVBoxLayout(tab)
         outer_layout.addWidget(outer_scroll)
         return tab
+
+    def on_show_help(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("도움말 - 기능 설명")
+        dlg.resize(640, 560)  # 스크롤 가능 + 위아래 길이 적당하도록 고정 크기
+        layout = QVBoxLayout(dlg)
+        text_view = QTextEdit()
+        text_view.setReadOnly(True)
+        text_view.setPlainText(get_help_text())
+        layout.addWidget(text_view)
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
+
+    def on_show_changelog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("업데이트 내역")
+        dlg.resize(600, 560)  # 스크롤 가능 + 위아래 길이 적당하도록 고정 크기
+        layout = QVBoxLayout(dlg)
+        text_view = QTextEdit()
+        text_view.setReadOnly(True)
+        text_view.setPlainText(get_changelog_text())
+        layout.addWidget(text_view)
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
+
+    def on_auto_update_setting_changed(self):
+        self.settings["auto_check_update"] = self.auto_update_cb.isChecked()
+        save_settings(self.settings)
+
+    def on_check_update(self, manual: bool = False):
+        """[v1.2.0_alpha] 업데이트 확인 시작 (수동 버튼 / 시작 시 자동 확인 공용)."""
+        if hasattr(self, "update_status_label"):
+            self.update_status_label.setText("업데이트 상태: 확인 중...")
+        self._update_check_thread = UpdateCheckThread()
+        self._update_check_thread.result_ready.connect(
+            lambda ok, data: self._on_update_check_result(ok, data, manual)
+        )
+        self._update_check_thread.start()
+
+    def _on_update_check_result(self, ok: bool, data, manual: bool):
+        if not ok:
+            if hasattr(self, "update_status_label"):
+                self.update_status_label.setText(f"업데이트 상태: 확인 실패 ({data})")
+            if manual:
+                QMessageBox.warning(self, "업데이트 확인 실패", f"GitHub에 연결하지 못했습니다:\n{data}")
+            return
+
+        remote_version = data.get("version", "")
+        if not remote_version or not is_newer_version(remote_version, APP_VERSION):
+            if hasattr(self, "update_status_label"):
+                self.update_status_label.setText(f"업데이트 상태: 최신 버전입니다 (v{APP_VERSION})")
+            if manual:
+                QMessageBox.information(self, "업데이트 확인", "이미 최신 버전을 사용하고 있습니다.")
+            return
+
+        if hasattr(self, "update_status_label"):
+            self.update_status_label.setText(f"업데이트 상태: 새 버전 발견 (v{remote_version})")
+
+        asset_url = pick_update_asset(data.get("assets", []))
+        if not asset_url:
+            QMessageBox.information(
+                self, "새 버전 발견",
+                f"새 버전(v{remote_version})이 있지만 자동으로 받을 파일을 찾지 못했습니다.\n"
+                f"GitHub 릴리스 페이지에서 직접 확인해주세요:\n{data.get('html_url', '')}"
+            )
+            return
+
+        confirm = QMessageBox.question(
+            self, "새 버전 발견",
+            f"새 버전 v{remote_version}이 있습니다 (현재: v{APP_VERSION}).\n"
+            "지금 내려받아 적용하시겠습니까? (실행 파일이 같은 이름으로 교체됩니다)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        target_path = get_running_program_path()
+        self._update_apply_thread = UpdateApplyThread(asset_url, target_path)
+        self._update_apply_thread.result_ready.connect(self._on_update_apply_result)
+        self._update_apply_thread.start()
+
+    def _on_update_apply_result(self, ok: bool, msg: str):
+        QMessageBox.information(self, "업데이트 결과", msg)
+        if ok:
+            restart = QMessageBox.question(
+                self, "다시 시작", "지금 프로그램을 다시 시작하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if restart == QMessageBox.StandardButton.Yes:
+                self._force_quit = True
+                program_path = get_running_program_path()
+                try:
+                    if getattr(sys, "frozen", False):
+                        subprocess.Popen([program_path])
+                    else:
+                        subprocess.Popen([sys.executable, program_path])
+                except Exception as e:
+                    QMessageBox.warning(self, "재시작 실패", f"자동 재시작에 실패했습니다. 수동으로 다시 실행해주세요.\n{e}")
+                QApplication.quit()
 
 
 # =====================================================================

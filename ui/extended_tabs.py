@@ -29,9 +29,10 @@ from features.startup import (
     StartupScanThread, toggle_startup_item, delete_startup_item, open_in_explorer,
 )
 from features.tweaks import (
-    PerfTweakThread, create_ultimate_performance_plan,
-    set_network_gaming_priority, set_high_res_timer, set_priority_separation,
+    PerfTweakTask, create_ultimate_performance_plan,
+    set_multimedia_system_profile, set_high_res_timer, set_priority_separation,
     set_visual_effects_performance, set_game_dvr_disabled,
+    set_games_task_profile, set_nagle_low_latency, set_bcd_timer_tweaks,
 )
 from features.diagnostics import (
     run_sfc_scan, run_dism_scan, RestoreDefaultsThread,
@@ -325,9 +326,45 @@ class ExtendedFeaturesMixin:
             "Xbox Game Bar의 백그라운드 녹화 기능(Game DVR)을 끕니다.\n"
             "게임 실행 중 자동 녹화로 인한 성능 저하와 오버레이 팝업을 방지합니다."
         )
-        for cb in (self.cb_net_priority, self.cb_high_res_timer, self.cb_priority_sep,
+
+        # ---- [v2.1.0] 비침습 저지연 튜닝 3종 ----
+        self.cb_games_task = QCheckBox("게임 작업 프로필 주입 (SystemProfile\\Tasks\\Games)")
+        self.cb_games_task.setToolTip(
+            "Windows의 멀티미디어 스케줄러(MMCSS)가 게임 스레드에 적용하는 규칙을 조정합니다.\n"
+            "GPU Priority 8 / Priority 6 / Scheduling Category High 를 주입해\n"
+            "게임이 스스로 'Games' 범주로 등록한 스레드가 더 우선 처리되도록 합니다.\n"
+            "게임이 등록한 스레드에만 적용되므로 다른 프로그램에는 영향이 없습니다.\n"
+            "관리자 권한이 필요하며 원클릭 순정 복원으로 되돌릴 수 있습니다."
+        )
+        self.cb_nagle_off = QCheckBox("Nagle 알고리즘 해제 (TcpAckFrequency / TCPNoDelay)")
+        self.cb_nagle_off.setToolTip(
+            "작은 TCP 패킷을 모아 보내는 Nagle 알고리즘을 끕니다.\n"
+            "조작 입력처럼 작은 패킷을 계속 주고받는 게임에서 최대 200ms까지\n"
+            "생기던 대기 시간을 줄일 수 있습니다. 대신 패킷 수가 늘어나므로\n"
+            "대역폭이 아주 좁은 회선에서는 권장하지 않습니다.\n"
+            "복원 시에는 값을 0으로 덮지 않고 완전히 삭제해 순정 상태로 되돌립니다."
+        )
+        self.cb_bcd_timer = QCheckBox("BCD 타이머 설정 (disabledynamictick / useplatformtick, 재부팅 필요)")
+        self.cb_bcd_timer.setToolTip(
+            "부팅 구성(BCD)에서 동적 틱을 끄고 플랫폼 타이머를 틱 소스로 씁니다.\n"
+            "타이머 주기가 일정해져 프레임 페이싱의 흔들림(지터)이 줄어듭니다.\n"
+            "일부 메인보드에서는 오히려 불안정할 수 있으니, 이상하면 순정 복원으로\n"
+            "되돌리세요. 적용/해제 모두 재부팅 후 반영됩니다."
+        )
+
+        for cb in (self.cb_net_priority, self.cb_games_task, self.cb_nagle_off,
+                   self.cb_bcd_timer, self.cb_high_res_timer, self.cb_priority_sep,
                    self.cb_visual_fx, self.cb_game_dvr):
             box_layout.addWidget(cb)
+
+        safety_note = QLabel(
+            "ℹ️ 여기 있는 항목은 모두 Microsoft가 문서화한 레지스트리 값과 bcdedit 옵션입니다.\n"
+            "드라이버 후킹이나 커널 조작이 전혀 없어 안티치트가 오탐할 여지가 없고,\n"
+            "[🩺 진단 & 복원] 탭의 '원클릭 순정 복원'으로 전부 되돌릴 수 있습니다."
+        )
+        safety_note.setWordWrap(True)
+        safety_note.setStyleSheet("color:#9a9ab0; padding:4px;")
+        box_layout.addWidget(safety_note)
 
         apply_btn = QPushButton("선택 항목 일괄 적용")
         apply_btn.setToolTip("체크한 항목들을 순서대로 적용합니다. 진행 중 오류가 나도 나머지 항목은 계속 시도합니다.")
@@ -372,7 +409,13 @@ class ExtendedFeaturesMixin:
             return
         tasks = []
         if self.cb_net_priority.isChecked():
-            tasks.append(("네트워크/CPU 게임 우선 배정", lambda: set_network_gaming_priority(True)))
+            tasks.append(("네트워크/CPU 게임 우선 배정", lambda: set_multimedia_system_profile(True)))
+        if self.cb_games_task.isChecked():
+            tasks.append(("게임 작업 프로필(Tasks\\Games) 주입", lambda: set_games_task_profile(True)))
+        if self.cb_nagle_off.isChecked():
+            tasks.append(("Nagle 알고리즘 해제", lambda: set_nagle_low_latency(True)))
+        if self.cb_bcd_timer.isChecked():
+            tasks.append(("BCD 타이머 설정", lambda: set_bcd_timer_tweaks(True)))
         if self.cb_high_res_timer.isChecked():
             tasks.append(("고해상도 타이머", lambda: set_high_res_timer(True)))
         if self.cb_priority_sep.isChecked():
@@ -388,7 +431,9 @@ class ExtendedFeaturesMixin:
         if not self._lut_confirm(f"선택한 {len(tasks)}개 항목을 적용하시겠습니까? 시스템 설정이 변경됩니다."):
             return
 
-        self._perf_thread = PerfTweakThread(tasks)
+        # [v2.1.0] QThread 를 매번 새로 만들지 않고 전역 QThreadPool 에 제출한다.
+        #   (버튼을 여러 번 눌러도 스레드가 쌓이지 않음 — 자원 누수 방지)
+        self._perf_thread = PerfTweakTask(tasks)
         self._perf_thread.progress_changed.connect(
             lambda pct, msg: self.perf_progress.setValue(pct)
         )

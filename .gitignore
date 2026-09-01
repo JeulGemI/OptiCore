@@ -13,6 +13,10 @@
 # 로컬 전용 사용자 데이터
 optimizer_settings.json
 optimizer_log.txt
+# [v2.1.0] 로그 로테이션 백업 (optimizer_log.txt.1 / .2)
+optimizer_log.txt.*
+# [v2.1.0] 원자적 저장이 남길 수 있는 임시 파일
+optimizer_settings.*.tmp
 
 # 자동 업데이트가 남기는 임시/백업 파일
 *.bak

@@ -9,8 +9,8 @@ config.py — OptiCore 전역 설정 계층 (최하위 모듈)
 담당 범위
   - 프로그램 이름/버전 상수, GitHub 저장소 상수
   - 선택적 의존성(send2trash / pynvml / winreg) 로드 및 가용 플래그
-  - 설정 파일(optimizer_settings.json) 로드/저장
-  - 로그 파일(optimizer_log.txt) 기록
+  - 설정 파일(optimizer_settings.json) 원자적(Atomic) 로드/저장
+  - 로그 파일(optimizer_log.txt) 기록 + 자동 로테이션(5MB x 백업 2개)
   - 리소스 경로 헬퍼 resource_path() — PyInstaller(sys._MEIPASS) 대응
   - 진입점(OptiCore.py) 정보 등록 — 헤더 주석/자기 자신 경로를 다른 모듈이 쓸 수 있게 함
 
@@ -38,8 +38,11 @@ config.py — OptiCore 전역 설정 계층 (최하위 모듈)
 import os
 import sys
 import json
+import logging
 import platform
-from datetime import datetime
+import tempfile
+import threading
+from logging.handlers import RotatingFileHandler
 
 import psutil
 
@@ -52,7 +55,7 @@ import psutil
 # 창 제목 + OptiCore.py 최상단 주석의 [변경 이력]에서만 관리합니다.
 # (다른 Claude 계정/세션에서 이어받아 작업할 때도 이 상수를 갱신 기준으로 삼으세요.)
 APP_NAME = "OptiCore"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"
 
 # =====================================================================
 # 자동 업데이트용 GitHub 저장소 정보 (공개 저장소 / 토큰 불필요)
@@ -65,6 +68,12 @@ GITHUB_API_LATEST_RELEASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHU
 
 # 창/트레이 아이콘 파일명 (없으면 시스템 기본 아이콘으로 대체됨)
 ICON_FILENAME = "icon.ico"
+
+# [v2.1.0] 중복 실행 감지 시 "이미 떠 있는 창"을 찾기 위한 제목 접두사.
+#   창 제목에는 버전(v2.1.0)이 들어가므로 정확히 일치시키기 어렵다. 그래서
+#   버전이 바뀌어도 깨지지 않도록 접두사만 맞춰 EnumWindows 로 찾는다.
+#   ui/main_window.py 의 setWindowTitle() 도 반드시 이 접두사로 시작해야 한다.
+WINDOW_TITLE_PREFIX = f"{APP_NAME} v"
 
 
 # =====================================================================
@@ -190,6 +199,36 @@ DEFAULT_SETTINGS = {
     #   gemini_precheck_enabled: 원클릭 최적화 사전 점검 시 AI 조언을 쓸지 여부
     "gemini_api_key": "",
     "gemini_precheck_enabled": True,
+
+    # ---- [v2.1.0] 창 닫기(X) 버튼 동작 ----
+    #   "minimize_taskbar" (기본값) : 작업 표시줄로 최소화 — 창은 사라지지만
+    #                                 작업 표시줄 아이콘이 남아 바로 되돌아올 수 있다
+    #   "minimize_tray"             : 시스템 트레이(우측 하단)로 숨김
+    #   "exit"                      : 프로그램 완전 종료
+    #   ※ 유효하지 않은 값이 들어와도 models.CloseAction.normalize() 가
+    #     기본값으로 되돌리므로 프로그램이 죽지 않는다.
+    "close_button_action": "minimize_taskbar",
+
+    # ---- [v2.1.0] 비침습적 게임 부스터 설정 ----
+    #   v2.0.x의 게임 부스터는 감시 중 주기적으로 메모리를 강제 회수하고
+    #   우선순위를 크게 올렸는데, 이 두 가지가 오히려 스터터와 오디오 끊김의
+    #   원인이었다. v2.1.0에서는 아래 기본값처럼 "건드리지 않는 쪽"이 기본이다.
+    "game_booster": {
+        "poll_interval_sec": 5,        # 감시 폴링 주기 (5초 미만으로 내려가지 않음)
+        "pre_trim_once": True,         # 게임 시작 직전 1회만 RAM 정리
+        "stabilize_priority": True,    # 게임 우선순위를 Normal 로 안정화
+        "allow_above_normal": False,   # 켜도 Above Normal 을 넘지 않음
+        "pcore_affinity": False,       # 하이브리드 CPU에서만 의미 있음
+        "suspend_background": False,   # 강제 종료 대신 일시 동결(NtSuspendProcess)
+        "mmcss_games": True,           # MMCSS "Games" 등록
+        "timer_resolution": True,      # 게임 중 1ms 타이머 유지
+        "background_apps": [],         # 비우면 models.DEFAULT_BACKGROUND_APPS 사용
+    },
+
+    # ---- [v2.1.0] 전역 저지연 타이머 ----
+    #   게임 중이 아닐 때도 1ms 타이머를 유지할지 여부. 켜면 반응성이 아주
+    #   미세하게 좋아지지만 노트북 배터리 소모가 늘어 기본값은 False 다.
+    "low_latency_timer_always": False,
 }
 
 
@@ -207,23 +246,120 @@ def load_settings() -> dict:
     return json.loads(json.dumps(DEFAULT_SETTINGS))
 
 
-def save_settings(settings: dict):
-    """설정을 json 파일로 저장한다 (다음 실행 시에도 유지됨)."""
+def save_settings(settings: dict) -> bool:
+    """
+    설정을 json 파일로 저장한다 (다음 실행 시에도 유지됨).
+
+    [v2.1.0 원자적(Atomic) 저장]
+      기존 방식은 open(..., "w") 로 원본을 먼저 비운 뒤 새 내용을 썼다.
+      그 사이(보통 수 ms)에 강제 종료·정전·블루스크린이 나면
+      optimizer_settings.json 이 0바이트로 남아 다음 실행 때 설정이 전부
+      초기화된다. 실제로 게임 중 강제 종료가 잦은 환경에서 충분히 일어난다.
+
+      그래서 아래 순서로 바꿨다.
+        1) 같은 폴더에 임시 파일(.tmp)을 만들고 거기에 전부 쓴다
+        2) flush + os.fsync 로 디스크에 실제로 내려썼음을 보장한다
+        3) os.replace 로 원본 위에 "원자적으로" 바꿔치기한다
+
+      os.replace 는 같은 볼륨 안에서 원자적 연산이 보장되므로, 어느 시점에
+      전원이 나가도 파일은 "옛 내용" 아니면 "새 내용"이지 절대 반쯤 쓰인
+      상태가 되지 않는다. 임시 파일을 같은 폴더에 만드는 이유도 이것이다
+      (다른 볼륨이면 원자성이 깨진다).
+    """
+    directory = os.path.dirname(SETTINGS_PATH) or "."
+    tmp_path = None
     try:
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="optimizer_settings.", suffix=".tmp", dir=directory
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(settings, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, SETTINGS_PATH)  # ← 원자적 교체
+        tmp_path = None
+        return True
+    except Exception as e:
+        write_log(f"설정 저장 실패: {e}")
+        return False
+    finally:
+        # 교체 전에 실패했다면 임시 파일이 남지 않도록 정리한다.
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+# =====================================================================
+# 로그 (RotatingFileHandler — 무한정 커지지 않도록 제한)
+# =====================================================================
+# [v2.1.0] 기존에는 optimizer_log.txt 에 계속 append 하기만 해서, 자동 정리를
+# 켜두고 몇 달 쓰면 수십 MB까지 자라 설정 탭의 [로그 보기]가 버벅였다.
+# 이제 5MB를 넘으면 optimizer_log.txt.1 / .2 로 넘기고 가장 오래된 것을 버린다.
+LOG_MAX_BYTES = 5 * 1024 * 1024   # 5MB
+LOG_BACKUP_COUNT = 2              # 백업 2개 (총 최대 약 15MB)
+
+_LOGGER_NAME = "OptiCore"
+_logger = None
+_logger_lock = threading.Lock()
+
+
+def _get_logger() -> logging.Logger:
+    """로거를 지연 생성한다 (여러 스레드에서 동시에 불러도 핸들러가 중복되지 않음)."""
+    global _logger
+    if _logger is not None:
+        return _logger
+    with _logger_lock:
+        if _logger is not None:
+            return _logger
+        logger = logging.getLogger(_LOGGER_NAME)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False  # 루트 로거로 새어나가 콘솔에 중복 출력되는 것 방지
+        if not logger.handlers:
+            try:
+                handler = RotatingFileHandler(
+                    LOG_FILE_PATH,
+                    maxBytes=LOG_MAX_BYTES,
+                    backupCount=LOG_BACKUP_COUNT,
+                    encoding="utf-8",
+                    delay=True,  # 첫 기록이 있을 때까지 파일을 열지 않는다
+                )
+                # 기존 로그 형식([YYYY-MM-DD HH:MM:SS] 메시지)을 그대로 유지한다.
+                # 설정 탭의 로그 뷰어와 사용자가 익숙한 형태를 깨지 않기 위함.
+                handler.setFormatter(
+                    logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+                )
+                logger.addHandler(handler)
+            except Exception:
+                # 파일을 못 여는 환경(권한/경로 문제)에서도 프로그램은 계속 동작해야 한다.
+                logger.addHandler(logging.NullHandler())
+        _logger = logger
+        return _logger
 
 
 def write_log(message: str):
-    """모든 실제 조치 내역을 로그 파일에 남긴다."""
+    """모든 실제 조치 내역을 로그 파일에 남긴다 (5MB 초과 시 자동 로테이션)."""
     try:
-        with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"[{timestamp}] {message}\n")
+        _get_logger().info(message)
     except Exception:
         pass
+
+
+def read_log_tail(max_chars: int = 200000) -> str:
+    """설정/대시보드 탭의 [로그 보기]용. 파일이 커도 뒷부분만 읽어온다."""
+    if not os.path.exists(LOG_FILE_PATH):
+        return "아직 기록된 로그가 없습니다."
+    try:
+        size = os.path.getsize(LOG_FILE_PATH)
+        with open(LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            if size > max_chars:
+                f.seek(size - max_chars)
+                f.readline()  # 잘린 첫 줄은 버린다
+            return f.read()
+    except Exception as e:
+        return f"로그를 읽을 수 없습니다: {e}"
 
 
 def get_changelog_text() -> str:
@@ -232,18 +368,44 @@ def get_changelog_text() -> str:
 
     [v2.0.0] 모듈 분리 후에는 config.py의 __doc__가 아니라, OptiCore.py가
     register_entry_point()로 등록해준 헤더 주석을 사용한다. 등록 전에 호출되는
-    상황(단위 테스트 등)에 대비해 파일에서 직접 읽는 예비 경로도 둔다."""
+    상황(단위 테스트 등)에 대비해 파일에서 직접 읽는 예비 경로도 둔다.
+
+    [v2.1.0] 헤더 표준화로 섹션 제목이 [변경 이력] → [주요 변경 이력]으로
+    바뀌었다. 다른 계정에서 옛 헤더가 담긴 파일을 붙여넣는 경우에도 깨지지
+    않도록 두 이름을 모두 인식한다."""
     doc = _ENTRY_DOC
     if not doc:
         doc = _read_entry_docstring_from_file()
-
-    section_header = " [변경 이력]\n " + ("=" * 69) + "\n"
-    try:
-        after_divider = doc.split(section_header, 1)[1]
-        changelog = after_divider.split("\n [주의]", 1)[0]
-        return changelog.strip("\n")
-    except IndexError:
+    if not doc:
         return "변경 이력을 불러올 수 없습니다."
+
+    divider = " " + ("=" * 69) + "\n"
+    # 변경 이력이 끝나는 지점. 헤더에 어떤 섹션이 이어지든 거기서 잘라낸다.
+    # (이 목록에 없는 섹션을 새로 추가했다면 여기에도 함께 넣어줄 것)
+    stop_markers = (
+        "\n ⚠️ 이 파일을 처음 여는",
+        "\n [모듈 구조",
+        "\n [AI 연동",
+        "\n [필요 라이브러리",
+        "\n [주의]",
+    )
+    for title in (" [주요 변경 이력]\n", " [변경 이력]\n"):
+        for section_header in (title + divider, title):
+            if section_header not in doc:
+                continue
+            body = doc.split(section_header, 1)[1]
+            # 여러 종료 표식 중 가장 먼저 나오는 곳에서 자른다.
+            cut = len(body)
+            for marker in stop_markers:
+                idx = body.find(marker)
+                if idx != -1:
+                    cut = min(cut, idx)
+            changelog = body[:cut].strip("\n")
+            # 섹션 사이의 구분선(=====)이 끝에 남으면 지저분하므로 정리한다.
+            changelog = changelog.rstrip().rstrip("=").rstrip()
+            if changelog:
+                return changelog
+    return "변경 이력을 불러올 수 없습니다."
 
 
 def _read_entry_docstring_from_file() -> str:

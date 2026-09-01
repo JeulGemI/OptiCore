@@ -24,7 +24,7 @@ from datetime import datetime
 
 import psutil
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThreadPool
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -36,8 +36,10 @@ from PyQt6.QtWidgets import (
 
 from config import (
     APP_NAME, APP_VERSION, IS_WINDOWS, NVML_AVAILABLE, SEND2TRASH_AVAILABLE,
-    LOG_FILE_PATH, load_settings, save_settings, write_log, get_changelog_text,
+    WINDOW_TITLE_PREFIX, load_settings, save_settings, write_log,
+    get_changelog_text, read_log_tail,
 )
+from models import CloseAction, DEFAULT_BACKGROUND_APPS, GameBoostOptions
 from themes import THEMES, DEFAULT_THEME_KEY, apply_theme
 from updater import (
     UpdateCheckThread, UpdateApplyThread, is_newer_version,
@@ -50,7 +52,10 @@ from core.scanner import (
 from core.actions import (
     OptimizationWorker, instant_cleanup_after_game_exit,
     trim_process_working_set, lower_process_priority, restore_process_priority,
-    raise_process_priority, set_nagle, create_restore_point,
+    set_nagle, create_restore_point,
+)
+from features.game_booster import (
+    GameBoostSession, get_cpu_topology_text, thaw_processes,
 )
 from ai.gemini_advisor import (
     GeminiConnectionTestThread, get_gemini_api_key, mask_api_key,
@@ -67,7 +72,9 @@ from ui.extended_tabs import ExtendedFeaturesMixin
 class MainWindow(ExtendedFeaturesMixin, QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} — 스마트 시스템 최적화 프로그램")
+        # ⚠️ 창 제목은 반드시 config.WINDOW_TITLE_PREFIX("OptiCore v")로 시작해야 한다.
+        #    중복 실행을 감지했을 때 core/win32.py 가 이 접두사로 기존 창을 찾는다.
+        self.setWindowTitle(f"{WINDOW_TITLE_PREFIX}{APP_VERSION} — 스마트 시스템 최적화 프로그램")
         # [v2.0.0] icon.ico 적용 (파일이 없으면 시스템 기본 아이콘으로 자동 fallback)
         self.setWindowIcon(load_app_icon(self))
         self.resize(960, 760)
@@ -84,14 +91,23 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         self.action_history = []  # 조치 내역(Undo 타임라인)
 
         # ---- 게임 감시/부스트 상태 ----
+        # [v2.1.0] 적용/원복 로직은 features/game_booster.GameBoostSession 이 전담한다.
+        #   UI는 "무엇을 되돌려야 하는지"를 더 이상 기억하지 않는다 (계층 분리).
+        self.boost_session = None
         self.watched_pid = None
         self.watched_name = None
-        self.boosted_original_priority_applied = False
         self.deprioritized_during_watch = []
         self.watch_timer = QTimer(self)
-        self.watch_timer.setInterval(2000)
+        # [v2.1.0] 폴링 주기를 2초 → 5초 이상으로 완화.
+        #   2초마다 깨우면 감시 자체가 CPU를 계속 두드려 절전 진입을 방해했다.
+        #   게임 종료 감지가 몇 초 늦어지는 것은 체감상 아무 문제가 없다.
+        self.watch_timer.setInterval(self._watch_interval_ms())
         self.watch_timer.timeout.connect(self.check_watched_process)
         self._force_quit = False
+
+        # [v2.1.0] 반복적인 QThread 생성 대신 전역 스레드 풀을 사용한다.
+        #   QRunnable 기반 작업(features/tweaks.PerfTweakTask 등)이 여기에 제출된다.
+        self.threadpool = QThreadPool.globalInstance()
 
         # ---- 자동 스마트 정리 타이머 ----
         self.auto_timer = QTimer(self)
@@ -129,6 +145,52 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
             QTimer.singleShot(3000, lambda: self.on_check_update(manual=False))
 
     # -----------------------------------------------------------------
+    # [v2.1.0] 설정 읽기 헬퍼
+    # -----------------------------------------------------------------
+    def _game_booster_settings(self) -> dict:
+        """설정 파일의 game_booster 항목을 기본값과 병합해 돌려준다.
+
+        구버전 설정 파일에는 이 항목이 아예 없으므로, 없으면 기본값을 만들어
+        넣어준다. (KeyError로 죽지 않게 하는 것이 목적)
+        """
+        from config import DEFAULT_SETTINGS
+        defaults = dict(DEFAULT_SETTINGS["game_booster"])
+        saved = self.settings.get("game_booster")
+        if isinstance(saved, dict):
+            defaults.update(saved)
+        self.settings["game_booster"] = defaults
+        return defaults
+
+    def _watch_interval_ms(self) -> int:
+        """감시 폴링 주기(ms). 어떤 값이 들어와도 5초 미만으로는 내려가지 않는다."""
+        conf = self._game_booster_settings()
+        try:
+            seconds = int(conf.get("poll_interval_sec", 5))
+        except (TypeError, ValueError):
+            seconds = 5
+        return max(5, seconds) * 1000
+
+    def _build_boost_options(self) -> GameBoostOptions:
+        """설정 dict → GameBoostOptions DTO 변환."""
+        conf = self._game_booster_settings()
+        apps = conf.get("background_apps") or list(DEFAULT_BACKGROUND_APPS)
+        return GameBoostOptions(
+            poll_interval_sec=max(5, int(conf.get("poll_interval_sec", 5) or 5)),
+            pre_trim_once=bool(conf.get("pre_trim_once", True)),
+            stabilize_priority=bool(conf.get("stabilize_priority", True)),
+            allow_above_normal=bool(conf.get("allow_above_normal", False)),
+            pcore_affinity=bool(conf.get("pcore_affinity", False)),
+            suspend_background=bool(conf.get("suspend_background", False)),
+            mmcss_games=bool(conf.get("mmcss_games", True)),
+            timer_resolution=bool(conf.get("timer_resolution", True)),
+            background_apps=list(apps),
+        )
+
+    def _close_action(self) -> str:
+        """현재 설정된 X 버튼 동작 (잘못된 값은 기본값으로 정규화)."""
+        return CloseAction.normalize(self.settings.get("close_button_action", CloseAction.MINIMIZE_TASKBAR))
+
+    # -----------------------------------------------------------------
     # 트레이 아이콘 (창을 닫아도 고립되지 않도록)
     # -----------------------------------------------------------------
     def _setup_tray_icon(self):
@@ -164,26 +226,103 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         self.tray_icon.show()
 
     def _show_from_tray(self):
+        """트레이/작업 표시줄에서 창을 되살린다.
+
+        hide() 로 숨긴 경우와 showMinimized() 로 최소화한 경우가 모두 있으므로
+        show() → showNormal() → raise_() → activateWindow() 를 순서대로 부른다.
+        하나라도 빠지면 어떤 상태에서는 창이 뒤에 가려진 채로 뜬다.
+        """
+        self.show()
         self.showNormal()
+        self.raise_()
         self.activateWindow()
 
     def _quit_from_tray(self):
         self._force_quit = True
+        self.shutdown_cleanup()
+        QApplication.quit()
+
+    def shutdown_cleanup(self):
+        """
+        프로그램이 실제로 종료되기 직전에 반드시 실행되어야 하는 정리 작업.
+
+        특히 중요한 것은 게임 부스터가 동결(NtSuspendProcess)해둔 백그라운드
+        앱의 해동이다. 이걸 빠뜨리면 사용자는 "브라우저가 먹통이 된" 상태로
+        남는다. features/game_booster.py 에 atexit 안전망이 하나 더 있지만,
+        정상 종료 경로에서는 여기서 확실히 되돌린다.
+        """
+        try:
+            if self.boost_session is not None:
+                self.boost_session.stop()
+                self.boost_session = None
+        except Exception as e:
+            write_log(f"종료 정리 중 게임 부스터 해제 실패: {e}")
+
         if self.watched_pid:
-            self.stop_watching(silent=True)
+            try:
+                self.stop_watching(silent=True)
+            except Exception:
+                pass
         if self.osd_widget:
-            self.osd_widget.close()
+            try:
+                self.osd_widget.close()
+            except Exception:
+                pass
+
+        # [v2.1.0] 스레드 풀에 남은 작업을 잠깐 기다린다.
+        #   성능 튜닝 작업(PerfTweakTask)은 레지스트리에 값을 쓰는 중일 수 있는데,
+        #   그 도중에 프로세스가 사라지면 값이 반쯤 적용된 상태로 남는다.
+        #   무한정 기다리면 종료가 막히므로 3초까지만 기다리고 넘어간다.
+        try:
+            self.threadpool.waitForDone(3000)
+        except Exception:
+            pass
+
         if self.tray_icon:
             self.tray_icon.hide()
-        QApplication.quit()
 
     def closeEvent(self, event):
         """
-        [버그 수정] 이제는 게임 감시 여부와 무관하게 항상 트레이로 최소화한다.
-        트레이가 아예 지원되지 않는 환경에서만 완전히 종료한다.
-        완전 종료는 트레이 메뉴의 [완전 종료]로만 가능하다.
+        X(닫기) 버튼을 눌렀을 때의 동작. [v2.1.0에서 사용자가 선택 가능]
+
+        ⚙️ 설정 탭의 '창 닫기(X) 동작'에서 세 가지 중 고를 수 있고,
+        기본값은 "작업 표시줄로 최소화"다.
+
+          minimize_taskbar (기본값)
+              event.ignore() 후 showMinimized(). 창은 사라지지만 작업 표시줄
+              아이콘이 그대로 남기 때문에, 트레이를 찾아 헤맬 필요 없이
+              한 번의 클릭으로 되돌아올 수 있다.
+              (v2.0.x는 무조건 트레이로 숨겨서, 트레이가 접혀 있는 PC에서는
+               프로그램이 사라진 것처럼 보인다는 지적이 있었다)
+
+          minimize_tray
+              기존 v2.0.x 동작. 작업 표시줄에서도 사라지고 트레이에만 남는다.
+
+          exit
+              완전 종료. 게임 감시 중이면 한 번 더 물어본다.
         """
-        if self.tray_icon and not self._force_quit:
+        # 트레이 메뉴의 [완전 종료]로 들어온 경우는 그대로 종료한다.
+        if self._force_quit:
+            self.shutdown_cleanup()
+            event.accept()
+            return
+
+        action = self._close_action()
+
+        # ---- 1) 작업 표시줄로 최소화 (기본값) ----
+        if action == CloseAction.MINIMIZE_TASKBAR:
+            event.ignore()
+            self.showMinimized()
+            return
+
+        # ---- 2) 시스템 트레이로 숨김 ----
+        if action == CloseAction.MINIMIZE_TRAY:
+            if not self.tray_icon:
+                # 트레이를 못 쓰는 환경에서 숨기면 창을 되찾을 방법이 없다.
+                # 그런 경우에는 안전하게 최소화로 대체한다.
+                event.ignore()
+                self.showMinimized()
+                return
             event.ignore()
             self.hide()
             self.tray_icon.showMessage(
@@ -192,10 +331,25 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
                 QSystemTrayIcon.MessageIcon.Information,
                 3000,
             )
-        else:
-            if self.tray_icon:
-                self.tray_icon.hide()
-            event.accept()
+            return
+
+        # ---- 3) 완전 종료 ----
+        if self.boost_session is not None and self.boost_session.state.active:
+            reply = QMessageBox.question(
+                self, "게임 부스터 동작 중",
+                "게임 부스터가 동작 중입니다.\n"
+                "지금 종료하면 적용된 설정을 원복하고 동결된 백그라운드 앱을 해동합니다.\n\n"
+                "종료할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
+        self._force_quit = True
+        self.shutdown_cleanup()
+        event.accept()
+        QApplication.quit()
 
     def toggle_osd(self):
         if self.osd_widget is None:
@@ -237,12 +391,13 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         layout.addWidget(status_label)
 
         # ---- 게임 감시 & 부스터 ----
-        watch_group = QGroupBox("⚡ 게임 부스터 (감시 시작 시 즉시 부스트 + 종료 시 자동 정리)")
+        watch_group = QGroupBox("⚡ 게임 부스터 (비침습 모드 — 게임 중에는 건드리지 않습니다)")
         watch_layout = QVBoxLayout(watch_group)
         watch_desc = QLabel(
-            "감시를 시작하면: 선택한 게임의 우선순위를 높이고, 백그라운드 앱은 우선순위를 낮춥니다.\n"
-            "게임 종료가 감지되면: 우선순위를 자동 원복하고 RAM을 즉시 정리합니다.\n"
-            "창을 닫아도 트레이에서 계속 감시합니다."
+            "시작할 때: 메모리를 딱 1회 정리하고, 게임 우선순위를 정상값으로 안정화합니다.\n"
+            "게임이 도는 동안: 살아있는지 확인만 합니다 (메모리 강제 회수·우선순위 조작 없음).\n"
+            "게임 종료가 감지되면: 적용한 설정을 전부 원복하고 RAM을 정리합니다.\n"
+            "⚙️ 설정 탭에서 P-Core 바인딩, 백그라운드 앱 일시 동결 등을 켤 수 있습니다."
         )
         watch_desc.setWordWrap(True)
         watch_desc.setStyleSheet("color:#9a9ab0;")
@@ -428,6 +583,13 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         if not s["enabled"]:
             return
 
+        # ⚠️ [v2.1.0 중요] 게임 부스트가 동작 중이면 자동 정리를 건너뛴다.
+        #   게임 부스터에서 주기적 트림을 없애놓고 여기서 1분마다 트림하면
+        #   결국 같은 스터터가 생긴다. "게임 중에는 건드리지 않는다"는 원칙은
+        #   프로그램 전체에 적용되어야 하므로 이 경로도 함께 막는다.
+        if self.boost_session is not None and self.boost_session.state.active:
+            return
+
         # 너무 자주 실행되지 않도록 최소 10분 간격(쿨다운) 적용
         if self.last_auto_run_time and (datetime.now() - self.last_auto_run_time).total_seconds() < 600:
             return
@@ -482,94 +644,147 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
             self.watch_combo.addItem(f"{name}  (PID {pid}, {mem_mb} MB)", (pid, name))
 
     def on_watch_toggle_clicked(self):
-        if self.watched_pid is None:
+        if self.boost_session is None or not self.boost_session.state.active:
             self.start_watching()
         else:
             self.stop_watching()
 
     def start_watching(self):
+        """
+        게임 부스트 세션을 시작한다. [v2.1.0 전면 재작성 — 비침습 방식]
+
+        v2.0.x는 여기서 게임 우선순위를 올리고 백그라운드 프로세스의 우선순위를
+        일괄로 낮췄다. 하지만 실제로는 그 두 동작이 오디오 끊김과 입력 지연의
+        원인이었다(자세한 근거는 features/game_booster.py 상단 주석 참고).
+
+        v2.1.0에서는 무엇을 적용하고 무엇을 되돌릴지 전부 GameBoostSession이
+        기억한다. 이 메서드는 "사용자 선택을 받아 세션을 열고, 결과를 화면에
+        표시"하는 UI 역할만 한다 (C# 이식 대비 계층 분리).
+        """
         item_data = self.watch_combo.currentData()
         if item_data is None:
             QMessageBox.warning(self, "선택 필요", "감시할 프로세스를 목록에서 선택하세요.")
             return
 
-        self.watched_pid, self.watched_name = item_data
+        pid, name = item_data
+        if not psutil.pid_exists(pid):
+            QMessageBox.warning(self, "프로세스 없음",
+                                f"'{name}' 프로세스가 이미 종료되었습니다.\n목록을 새로고침해주세요.")
+            self.refresh_watch_combo()
+            return
 
-        # ---- 게임 부스트 즉시 적용 ----
-        boosted = raise_process_priority(self.watched_pid)
-        if boosted:
-            write_log(f"게임 부스트: {self.watched_name} 우선순위 상승 (PID {self.watched_pid})")
-            self.add_history_entry(f"[부스트] {self.watched_name} 우선순위 상승", "boost_priority",
-                                    pid=self.watched_pid, name=self.watched_name)
+        options = self._build_boost_options()
+        self.boost_session = GameBoostSession(options)
+        state = self.boost_session.start(pid, name, self.excluded_set)
 
-        cpu_candidates = scan_cpu_candidates(3, self.excluded_set)
-        boosted_bg = []
-        for pid, name, cpu_pct in cpu_candidates:
-            if pid == self.watched_pid:
-                continue
-            if lower_process_priority(pid):
-                boosted_bg.append((pid, name))
-                self.add_history_entry(f"[부스트] {name} 우선순위 낮춤", "priority", pid=pid, name=name)
-        self.deprioritized_during_watch.extend(boosted_bg)
+        # 호환용 상태 (기존 코드가 watched_pid 를 참조하는 곳이 남아 있음)
+        self.watched_pid = pid
+        self.watched_name = name
 
+        # 되돌릴 수 있는 조치는 Undo 타임라인에도 남긴다.
+        if state.frozen:
+            self.add_history_entry(
+                f"[부스터] 백그라운드 {len(state.frozen)}개 일시 동결", "thaw_frozen",
+                pid=pid, name=name,
+            )
+        if state.pcore_applied:
+            self.add_history_entry(f"[부스터] {name} P-Core 바인딩", None, pid=pid, name=name)
+
+        # 폴링 주기는 설정이 바뀌었을 수 있으므로 매번 다시 적용한다.
+        self.watch_timer.setInterval(self._watch_interval_ms())
         self.watch_timer.start()
-        self.watch_toggle_btn.setText("■ 감시 중지")
+
+        self.watch_toggle_btn.setText("■ 부스트 중지")
         self.watch_status_label.setText(
-            f"🟢 감시+부스트 중: {self.watched_name} (PID {self.watched_pid}) - "
-            f"백그라운드 {len(boosted_bg)}개 양보 처리됨"
+            self.boost_session.describe()
+            + f"  (폴링 {self.watch_timer.interval() // 1000}초)"
         )
         if self.tray_icon:
-            self.tray_icon.setToolTip(f"감시 중: {self.watched_name}")
-        write_log(f"게임 종료 자동 감지 시작: {self.watched_name} (PID {self.watched_pid})")
+            self.tray_icon.setToolTip(f"게임 부스터 동작 중: {name}")
+
+        # 적용 내역을 사용자에게 그대로 보여준다 (조용히 시스템을 바꾸지 않는다).
+        detail = "\n".join(f"· {line}" for line in state.notes) or "· 적용된 항목 없음"
+        QMessageBox.information(
+            self, "게임 부스터 시작",
+            f"'{name}' 감시를 시작했습니다.\n\n{detail}\n\n"
+            "게임이 실행되는 동안 OptiCore는 살아있는지 확인만 하며,\n"
+            "메모리 정리나 우선순위 조작을 반복하지 않습니다."
+        )
 
     def stop_watching(self, silent=False):
+        """사용자가 수동으로 부스트를 중지한다 (적용된 항목 전부 원복)."""
         self.watch_timer.stop()
-        if self.watched_pid and restore_process_priority(self.watched_pid):
-            write_log(f"게임 부스트 원복: {self.watched_name} (PID {self.watched_pid})")
-        if not silent:
-            write_log(f"게임 종료 자동 감지 중지: {self.watched_name}")
+
+        result = None
+        if self.boost_session is not None:
+            result = self.boost_session.stop(game_exited=False)
+            self.boost_session = None
+
         self.watched_pid = None
         self.watched_name = None
-        self.watch_toggle_btn.setText("▶ 이 게임 부스트 + 종료 감시 시작")
-        self.watch_status_label.setText("감시 중이 아닙니다.")
+
+        if hasattr(self, "watch_toggle_btn"):
+            self.watch_toggle_btn.setText("▶ 이 게임 부스트 + 종료 감시 시작")
+            self.watch_status_label.setText("감시 중이 아닙니다.")
         if self.tray_icon:
             self.tray_icon.setToolTip("스마트 시스템 최적화 - 대기 중")
 
+        if not silent and result:
+            resumed = result.get("resumed", 0)
+            msg = "게임 부스터를 중지하고 적용된 설정을 원복했습니다."
+            if resumed:
+                msg += f"\n동결되어 있던 백그라운드 앱 {resumed}개를 해동했습니다."
+            QMessageBox.information(self, "부스터 중지", msg)
+
     def check_watched_process(self):
-        if self.watched_pid is None:
-            return
-        if psutil.pid_exists(self.watched_pid):
+        """
+        감시 주기마다 호출된다. [v2.1.0 — 여기서는 '확인'만 한다]
+
+        예전에는 이 루프 안에서 메모리 트림까지 했지만, 게임이 도는 중의 트림은
+        페이지 폴트를 유발해 스터터를 만든다. 그래서 정리는 '게임이 끝난 뒤'로
+        전부 옮겼다.
+        """
+        if self.boost_session is None or not self.boost_session.state.active:
+            self.watch_timer.stop()
             return
 
-        finished_name = self.watched_name
+        result = self.boost_session.poll()
+        if result is None:
+            return  # 게임이 아직 실행 중 — 아무것도 하지 않는다
+
+        # ---- 여기부터는 게임이 종료된 뒤 ----
         self.watch_timer.stop()
+        finished_name = result.get("game_name") or self.watched_name
+        resumed = result.get("resumed", 0)
+        self.boost_session = None
+        self.watched_pid = None
+        self.watched_name = None
 
-        result = instant_cleanup_after_game_exit(self.deprioritized_during_watch, self.excluded_set)
+        # 게임이 끝난 지금이야말로 메모리를 정리하기 좋은 시점이다.
+        cleanup = instant_cleanup_after_game_exit(self.deprioritized_during_watch, self.excluded_set)
         for pid, name in self.deprioritized_during_watch:
             self.add_history_entry(f"[자동원복] {name} 우선순위 원복", "reverted", pid=pid, name=name)
         self.deprioritized_during_watch = []
 
         write_log(
-            f"[자동] '{finished_name}' 종료 감지 -> RAM {result['freed_mb']}MB 확보, "
-            f"{result['trimmed_count']}개 프로세스 트림, {result['restored_count']}개 우선순위 원복"
+            f"[자동] '{finished_name}' 종료 감지 -> RAM {cleanup['freed_mb']}MB 확보, "
+            f"{cleanup['trimmed_count']}개 트림, 백그라운드 {resumed}개 해동"
         )
 
-        detect_msg = f"'{finished_name}' 종료를 감지해 RAM {result['freed_mb']}MB를 즉시 확보했습니다."
+        detect_msg = f"'{finished_name}' 종료를 감지해 RAM {cleanup['freed_mb']}MB를 확보했습니다."
+        if resumed:
+            detect_msg += f" (백그라운드 {resumed}개 해동)"
+
         if self.tray_icon:
             self.tray_icon.showMessage("게임 종료 감지 - 자동 정리 완료", detect_msg,
-                                        QSystemTrayIcon.MessageIcon.Information, 5000)
+                                       QSystemTrayIcon.MessageIcon.Information, 5000)
         elif self.isVisible():
             QMessageBox.information(self, "게임 종료 감지", detect_msg)
 
-        self.watched_pid = None
-        self.watched_name = None
         if self.isVisible():
             self.watch_toggle_btn.setText("▶ 이 게임 부스트 + 종료 감시 시작")
-            self.watch_status_label.setText(
-                f"✅ '{finished_name}' 종료를 감지해 자동으로 정리했습니다. (RAM {result['freed_mb']}MB 확보)"
-            )
+            self.watch_status_label.setText(f"✅ {detect_msg}")
             self.refresh_watch_combo()
-
     # ---- 최적화 시작 (스캔은 ScannerWorker로 비동기 처리) ----
     def on_start_clicked(self):
         options = {
@@ -740,6 +955,13 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
                 done_label = QLabel("✅ 자동 원복됨")
                 done_label.setStyleSheet("color:#63e6a3;")
                 row_layout.addWidget(done_label)
+            elif entry["revert_type"] == "thaw_frozen":
+                # [v2.1.0] 게임이 끝나기 전에도 동결된 앱을 바로 되살릴 수 있게 한다.
+                #   "브라우저를 잠깐만 확인하고 싶다"는 상황이 실제로 자주 생긴다.
+                btn = QPushButton("지금 해동")
+                btn.setObjectName("secondaryButton")
+                btn.clicked.connect(lambda _, e=entry: self.thaw_frozen_now(e))
+                row_layout.addWidget(btn)
             else:
                 na_label = QLabel("되돌릴 수 없음")
                 na_label.setStyleSheet("color:#666;")
@@ -761,6 +983,28 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         else:
             QMessageBox.warning(self, "원복 실패", "이미 종료되었거나 권한이 없어 원복할 수 없습니다.")
         self.refresh_history_list()
+
+    def thaw_frozen_now(self, entry):
+        """[v2.1.0] 게임이 끝나기 전에 동결된 백그라운드 앱만 먼저 해동한다.
+
+        게임 부스트 자체는 계속 유지되므로, 브라우저를 잠깐 확인한 뒤에도
+        P-Core 바인딩이나 타이머 설정은 그대로 남는다.
+        """
+        if self.boost_session is None or not self.boost_session.state.frozen:
+            QMessageBox.information(self, "안내", "현재 동결되어 있는 프로세스가 없습니다.")
+            entry["revert_type"] = "reverted"
+            self.refresh_history_list()
+            return
+
+        resumed, notes = thaw_processes(self.boost_session.state.frozen)
+        self.boost_session.state.frozen = []
+        entry["revert_type"] = "reverted"
+        self.refresh_history_list()
+
+        msg = f"{resumed}개 프로세스를 해동했습니다."
+        if notes:
+            msg += "\n\n" + "\n".join(notes[:5])
+        QMessageBox.information(self, "해동 완료", msg)
 
     def refresh_dashboard(self):
         if not self.last_report:
@@ -816,11 +1060,9 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         layout = QVBoxLayout(dlg)
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
-        try:
-            with open(LOG_FILE_PATH, "r", encoding="utf-8") as f:
-                text_edit.setPlainText(f.read())
-        except FileNotFoundError:
-            text_edit.setPlainText("아직 기록된 로그가 없습니다.")
+        # [v2.1.0] 로그가 5MB까지 커질 수 있으므로 전체를 통째로 읽지 않고
+        #   뒷부분(최근 기록)만 가져온다. 창이 뜨는 속도가 크게 달라진다.
+        text_edit.setPlainText(read_log_tail())
         layout.addWidget(text_edit)
         close_btn = QPushButton("닫기")
         close_btn.clicked.connect(dlg.accept)
@@ -1078,7 +1320,158 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         help_layout.addWidget(help_btn)
         layout.addWidget(help_box)
 
-        # ---- 3) [v2.0.0] Google Gemini API 설정 ----
+        # ---- 3) [v2.1.0] 창 닫기(X) 동작 ----
+        close_box = QGroupBox("🪟 창 닫기(X) 동작")
+        close_layout = QVBoxLayout(close_box)
+        close_desc = QLabel(
+            "창의 X 버튼을 눌렀을 때 어떻게 할지 고를 수 있습니다.\n"
+            "v2.0.x는 무조건 트레이로 숨겨서, 트레이가 접혀 있는 PC에서는\n"
+            "프로그램이 사라진 것처럼 보이는 문제가 있었습니다."
+        )
+        close_desc.setWordWrap(True)
+        close_desc.setStyleSheet("color:#9a9ab0;")
+        close_layout.addWidget(close_desc)
+
+        self.close_action_combo = QComboBox()
+        current_close = self._close_action()
+        close_selected = 0
+        for i, key in enumerate(CloseAction.ALL):
+            self.close_action_combo.addItem(CloseAction.LABELS[key], userData=key)
+            if key == current_close:
+                close_selected = i
+        self.close_action_combo.setCurrentIndex(close_selected)
+        self.close_action_combo.setToolTip(
+            "작업 표시줄로 최소화: 창은 사라지지만 작업 표시줄 아이콘이 남습니다 (기본값).\n"
+            "시스템 트레이로 숨김: 작업 표시줄에서도 사라지고 우측 하단 트레이에만 남습니다.\n"
+            "프로그램 완전 종료: X를 누르면 바로 종료합니다 (게임 감시 중이면 한 번 더 확인).\n"
+            "※ 어떤 설정이든 트레이 메뉴의 [완전 종료]로는 항상 끌 수 있습니다."
+        )
+        self.close_action_combo.currentIndexChanged.connect(self.on_close_action_changed)
+        close_layout.addWidget(self.close_action_combo)
+
+        self.close_action_status = QLabel()
+        self.close_action_status.setWordWrap(True)
+        self.close_action_status.setStyleSheet("color:#9a9ab0;")
+        close_layout.addWidget(self.close_action_status)
+        self._refresh_close_action_status()
+        layout.addWidget(close_box)
+
+        # ---- 4) [v2.1.0] 게임 부스터 (비침습 옵션) ----
+        booster_box = QGroupBox("🎮 게임 부스터 동작 방식")
+        booster_layout = QVBoxLayout(booster_box)
+        booster_desc = QLabel(
+            "v2.1.0의 게임 부스터는 '최대한 건드리지 않는 것'이 기본입니다.\n"
+            "게임 실행 중 메모리 강제 회수와 우선순위 격상은 오히려 스터터와\n"
+            "오디오 끊김을 만들기 때문에 전부 제거되었습니다."
+        )
+        booster_desc.setWordWrap(True)
+        booster_desc.setStyleSheet("color:#9a9ab0;")
+        booster_layout.addWidget(booster_desc)
+
+        gb = self._game_booster_settings()
+
+        poll_row = QHBoxLayout()
+        poll_row.addWidget(QLabel("감시 폴링 주기(초):"))
+        self.gb_poll_spin = QSpinBox()
+        self.gb_poll_spin.setRange(5, 60)   # 5초 미만은 애초에 선택할 수 없다
+        self.gb_poll_spin.setValue(max(5, int(gb.get("poll_interval_sec", 5) or 5)))
+        self.gb_poll_spin.setToolTip(
+            "게임이 아직 실행 중인지 확인하는 주기입니다.\n"
+            "짧을수록 종료 감지가 빠르지만 그만큼 CPU를 자주 깨웁니다.\n"
+            "5초 미만으로는 설정할 수 없습니다 (v2.1.0 오버헤드 제거 정책)."
+        )
+        self.gb_poll_spin.valueChanged.connect(self.on_game_booster_setting_changed)
+        poll_row.addWidget(self.gb_poll_spin)
+        poll_row.addStretch()
+        booster_layout.addLayout(poll_row)
+
+        self.gb_pre_trim_cb = QCheckBox("게임 시작 직전에 딱 1회만 메모리 정리")
+        self.gb_pre_trim_cb.setToolTip(
+            "게임이 메모리를 잡기 전에 미리 자리를 비워둡니다.\n"
+            "게임이 실행되는 동안에는 절대 다시 정리하지 않습니다\n"
+            "(실행 중 정리는 페이지 폴트를 유발해 프레임이 튑니다)."
+        )
+        self.gb_pre_trim_cb.setChecked(bool(gb.get("pre_trim_once", True)))
+        self.gb_pre_trim_cb.stateChanged.connect(self.on_game_booster_setting_changed)
+        booster_layout.addWidget(self.gb_pre_trim_cb)
+
+        self.gb_stabilize_cb = QCheckBox("게임 우선순위를 Normal로 안정화")
+        self.gb_stabilize_cb.setToolTip(
+            "런처를 통해 실행되면서 우선순위가 낮게 떨어진 게임을 바로잡습니다.\n"
+            "올리는 것이 아니라 '정상값으로 맞추는' 동작입니다."
+        )
+        self.gb_stabilize_cb.setChecked(bool(gb.get("stabilize_priority", True)))
+        self.gb_stabilize_cb.stateChanged.connect(self.on_game_booster_setting_changed)
+        booster_layout.addWidget(self.gb_stabilize_cb)
+
+        self.gb_above_normal_cb = QCheckBox("Above Normal까지 허용 (권장하지 않음)")
+        self.gb_above_normal_cb.setToolTip(
+            "게임 우선순위를 한 단계 위(Above Normal)까지 올립니다.\n"
+            "High나 Realtime으로는 어떤 경우에도 올라가지 않습니다 —\n"
+            "그 두 단계는 오디오/입력 스레드를 굶겨 소리가 끊기게 만듭니다."
+        )
+        self.gb_above_normal_cb.setChecked(bool(gb.get("allow_above_normal", False)))
+        self.gb_above_normal_cb.stateChanged.connect(self.on_game_booster_setting_changed)
+        booster_layout.addWidget(self.gb_above_normal_cb)
+
+        self.gb_pcore_cb = QCheckBox("하이브리드 CPU에서 게임을 P-Core에만 바인딩")
+        self.gb_pcore_cb.setToolTip(
+            "12세대 인텔 이후 CPU는 성능 코어(P-Core)와 효율 코어(E-Core)가 섞여 있습니다.\n"
+            "일부 게임은 이를 구분하지 못해 렌더 스레드가 E-Core로 밀립니다.\n"
+            "동종 코어 CPU에서는 아무 동작도 하지 않습니다."
+        )
+        self.gb_pcore_cb.setChecked(bool(gb.get("pcore_affinity", False)))
+        self.gb_pcore_cb.stateChanged.connect(self.on_game_booster_setting_changed)
+        booster_layout.addWidget(self.gb_pcore_cb)
+
+        cpu_topo_label = QLabel(get_cpu_topology_text())
+        cpu_topo_label.setWordWrap(True)
+        cpu_topo_label.setStyleSheet("color:#9a9ab0; padding-left:18px;")
+        booster_layout.addWidget(cpu_topo_label)
+
+        self.gb_suspend_cb = QCheckBox("백그라운드 앱을 강제 종료 대신 일시 동결")
+        self.gb_suspend_cb.setToolTip(
+            "브라우저나 런처를 종료하지 않고 NtSuspendProcess로 멈춥니다.\n"
+            "CPU 점유율은 0이 되지만 열어둔 탭과 로그인 상태는 그대로 보존되며,\n"
+            "게임이 끝나면 자동으로 되살아납니다.\n"
+            "안티치트·오디오·그래픽 드라이버 프로세스는 절대 대상이 되지 않습니다."
+        )
+        self.gb_suspend_cb.setChecked(bool(gb.get("suspend_background", False)))
+        self.gb_suspend_cb.stateChanged.connect(self.on_game_booster_setting_changed)
+        booster_layout.addWidget(self.gb_suspend_cb)
+
+        freeze_targets = gb.get("background_apps") or list(DEFAULT_BACKGROUND_APPS)
+        freeze_label = QLabel(
+            "동결 대상 기본 목록: " + ", ".join(freeze_targets[:8])
+            + (f" 외 {len(freeze_targets) - 8}개" if len(freeze_targets) > 8 else "")
+        )
+        freeze_label.setWordWrap(True)
+        freeze_label.setStyleSheet("color:#9a9ab0; padding-left:18px;")
+        booster_layout.addWidget(freeze_label)
+
+        self.gb_timer_cb = QCheckBox("게임 중 1ms 고해상도 타이머 유지 (timeBeginPeriod)")
+        self.gb_timer_cb.setToolTip(
+            "Windows의 기본 타이머 주기(약 15.6ms)를 1ms로 낮춰 대기 정밀도를 높입니다.\n"
+            "게임이 끝나면 반드시 원래대로 되돌립니다 (비정상 종료 시에도 자동 해제)."
+        )
+        self.gb_timer_cb.setChecked(bool(gb.get("timer_resolution", True)))
+        self.gb_timer_cb.stateChanged.connect(self.on_game_booster_setting_changed)
+        booster_layout.addWidget(self.gb_timer_cb)
+
+        self.gb_mmcss_cb = QCheckBox("감시 스레드를 MMCSS 'Games'로 등록")
+        self.gb_mmcss_cb.setToolTip(
+            "게임이 CPU를 꽉 채운 상황에서도 OptiCore의 감시 스레드가 밀리지 않도록\n"
+            "합니다. 게임 종료 감지와 백그라운드 해동이 제때 이뤄지게 하는 용도이며,\n"
+            "게임 자체를 빠르게 만드는 설정은 아닙니다.\n"
+            "(게임에 적용되는 MMCSS 설정은 [성능 & 게이밍] 탭의 Tasks\\Games 항목입니다)"
+        )
+        self.gb_mmcss_cb.setChecked(bool(gb.get("mmcss_games", True)))
+        self.gb_mmcss_cb.stateChanged.connect(self.on_game_booster_setting_changed)
+        booster_layout.addWidget(self.gb_mmcss_cb)
+
+        layout.addWidget(booster_box)
+
+        # ---- 5) Google Gemini API 설정 ----
         gemini_box = QGroupBox("🤖 Google Gemini API 설정")
         gemini_layout = QVBoxLayout(gemini_box)
 
@@ -1145,7 +1538,7 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
 
         layout.addWidget(gemini_box)
 
-        # ---- 4) 프로그램 정보 (제작자/버전 + 업데이트 내역 + 업데이트 확인) ----
+        # ---- 6) 프로그램 정보 (제작자/버전 + 업데이트 내역 + 업데이트 확인) ----
         info_box = QGroupBox("ℹ️ 프로그램 정보")
         info_layout = QVBoxLayout(info_box)
         info_layout.addWidget(QLabel(f"{APP_NAME} v{APP_VERSION}"))
@@ -1184,6 +1577,54 @@ class MainWindow(ExtendedFeaturesMixin, QMainWindow):
         outer_layout = QVBoxLayout(tab)
         outer_layout.addWidget(outer_scroll)
         return tab
+
+    # -----------------------------------------------------------------
+    # [v2.1.0] 창 닫기 동작 / 게임 부스터 설정 핸들러
+    # -----------------------------------------------------------------
+    def _refresh_close_action_status(self):
+        """선택한 동작이 실제로 가능한 환경인지 알려준다."""
+        action = self._close_action()
+        if action == CloseAction.MINIMIZE_TRAY and not self.tray_icon:
+            self.close_action_status.setText(
+                "⚠️ 이 시스템에서는 트레이를 사용할 수 없어, X를 눌러도 "
+                "작업 표시줄 최소화로 대체 동작합니다."
+            )
+        elif action == CloseAction.EXIT:
+            self.close_action_status.setText(
+                "ℹ️ X를 누르면 프로그램이 종료됩니다. 게임 부스터가 동작 중이면 "
+                "적용된 설정을 원복한 뒤 종료합니다."
+            )
+        else:
+            self.close_action_status.setText(
+                "ℹ️ 트레이 아이콘 우클릭 → [완전 종료]로는 언제든 완전히 끌 수 있습니다."
+            )
+
+    def on_close_action_changed(self, index: int):
+        key = self.close_action_combo.itemData(index)
+        self.settings["close_button_action"] = CloseAction.normalize(key)
+        # 변경 즉시 원자적으로 저장한다 (강제 종료되어도 설정이 날아가지 않음).
+        save_settings(self.settings)
+        self._refresh_close_action_status()
+        write_log(f"창 닫기(X) 동작 변경: {self.settings['close_button_action']}")
+
+    def on_game_booster_setting_changed(self):
+        """게임 부스터 옵션이 바뀔 때마다 즉시 원자적 저장."""
+        conf = self._game_booster_settings()
+        conf["poll_interval_sec"] = max(5, self.gb_poll_spin.value())
+        conf["pre_trim_once"] = self.gb_pre_trim_cb.isChecked()
+        conf["stabilize_priority"] = self.gb_stabilize_cb.isChecked()
+        conf["allow_above_normal"] = self.gb_above_normal_cb.isChecked()
+        conf["pcore_affinity"] = self.gb_pcore_cb.isChecked()
+        conf["suspend_background"] = self.gb_suspend_cb.isChecked()
+        conf["timer_resolution"] = self.gb_timer_cb.isChecked()
+        conf["mmcss_games"] = self.gb_mmcss_cb.isChecked()
+        self.settings["game_booster"] = conf
+        save_settings(self.settings)
+
+        # 이미 감시 중이라면 폴링 주기만 즉시 반영한다
+        # (나머지 옵션은 다음 세션부터 — 중간에 바꾸면 원복 대상이 어긋난다)
+        if self.watch_timer.isActive():
+            self.watch_timer.setInterval(self._watch_interval_ms())
 
     # -----------------------------------------------------------------
     # [v2.0.0] Google Gemini API 설정 핸들러

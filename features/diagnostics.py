@@ -30,6 +30,7 @@ from features.debloat import set_telemetry_disabled
 from features.tweaks import (
     set_network_gaming_priority, set_high_res_timer, set_priority_separation,
     set_visual_effects_performance, set_game_dvr_disabled,
+    set_games_task_profile, set_bcd_timer_tweaks, set_nagle_low_latency,
 )
 
 
@@ -109,6 +110,29 @@ def restore_all_defaults(settings: dict):
         results.append(("텔레메트리 복원", ok, msg))
     except Exception as e:
         results.append(("텔레메트리 복원", False, str(e)))
+
+    # ---- [v2.1.0] 새로 추가된 저지연 튜닝 항목도 함께 되돌린다 ----
+    # 순정 복원은 "이 프로그램이 바꾼 것은 전부 되돌린다"가 원칙이다.
+    # 새 기능을 추가하고 여기에 복원 코드를 빠뜨리면, 사용자가 순정 복원을
+    # 눌러도 설정이 남아 있는 신뢰 문제가 생긴다.
+    try:
+        ok, msg = set_games_task_profile(False)
+        results.append(("게임 작업 프로필(Tasks\\Games) 복원", ok, msg))
+    except Exception as e:
+        results.append(("게임 작업 프로필(Tasks\\Games) 복원", False, str(e)))
+
+    try:
+        # Nagle 은 값을 0으로 덮는 게 아니라 삭제해야 순정으로 돌아간다.
+        ok, msg = set_nagle_low_latency(False)
+        results.append(("Nagle 알고리즘 기본값 복원", ok, msg))
+    except Exception as e:
+        results.append(("Nagle 알고리즘 기본값 복원", False, str(e)))
+
+    try:
+        ok, msg = set_bcd_timer_tweaks(False)
+        results.append(("BCD 타이머 설정 복원(재부팅 필요)", ok, msg))
+    except Exception as e:
+        results.append(("BCD 타이머 설정 복원(재부팅 필요)", False, str(e)))
 
     settings["applied_tweaks"] = []
     save_settings(settings)

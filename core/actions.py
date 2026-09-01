@@ -17,7 +17,6 @@ core/actions.py — 시스템을 실제로 "변경"하는 저수준 동작
 
 import os
 import time
-import ctypes
 import subprocess
 from datetime import datetime
 
@@ -31,28 +30,23 @@ from config import (
     write_log,
 )
 from core.scanner import is_admin, scan_ram_candidates, scan_gpu_info
+from core.win32 import empty_working_set
 
 
 # =====================================================================
 # 2. 실제 조치(액션) 함수들
 # =====================================================================
 def trim_process_working_set(pid: int) -> bool:
-    """프로세스를 종료하지 않고 워킹셋(물리 메모리 점유분)만 비운다."""
-    if not IS_WINDOWS:
-        return False
-    try:
-        PROCESS_QUERY_INFORMATION = 0x0400
-        PROCESS_SET_QUOTA = 0x0100
-        handle = ctypes.windll.kernel32.OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, False, pid
-        )
-        if not handle:
-            return False
-        result = ctypes.windll.psapi.EmptyWorkingSet(handle)
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return bool(result)
-    except Exception:
-        return False
+    """프로세스를 종료하지 않고 워킹셋(물리 메모리 점유분)만 비운다.
+
+    [v2.1.0] ctypes 호출부를 core/win32.py 로 옮기고 여기서는 위임만 한다.
+    예전 구현은 OpenProcess 실패 시 핸들을 닫지 않는 경로가 있었는데,
+    win32.ProcessHandle(with 블록)을 쓰면 예외가 나도 반드시 닫힌다.
+
+    ⚠️ 게임 실행 중에는 이 함수를 주기적으로 호출하지 말 것.
+       (자세한 이유는 features/game_booster.py 상단 주석 참고)
+    """
+    return empty_working_set(pid)
 
 
 def lower_process_priority(pid: int) -> bool:
@@ -82,7 +76,15 @@ def restore_process_priority(pid: int) -> bool:
 
 
 def raise_process_priority(pid: int) -> bool:
-    """게임 부스트용: 감시 중인 게임 프로세스의 우선순위를 한 단계 높인다 (되돌리기 가능)."""
+    """게임 프로세스의 우선순위를 한 단계(Above Normal) 높인다.
+
+    ⚠️ [v2.1.0] 게임 부스터의 기본 경로에서는 더 이상 이 함수를 쓰지 않는다.
+       우선순위를 올리면 렌더 스레드가 오디오/입력 스레드를 굶겨 "프레임은
+       나오는데 소리가 끊기는" 증상이 생기기 때문이다. 기본 동작은
+       features/game_booster.stabilize_game_priority() 의 Normal 안정화다.
+       이 함수는 사용자가 설정에서 명시적으로 허용했을 때만 호출되며,
+       어떤 경우에도 High/Realtime 으로는 올라가지 않는다.
+    """
     try:
         p = psutil.Process(pid)
         if IS_WINDOWS:
@@ -181,11 +183,17 @@ def create_restore_point():
     if not is_admin():
         return False, "관리자 권한이 필요합니다."
     try:
+        # [v2.1.0] CREATE_NO_WINDOW 를 줘서 PowerShell 콘솔 창이 번쩍이지 않게 한다.
+        #   복구 지점 생성은 WMI(SystemRestore) 호출이라 순수 ctypes 로는 대체가
+        #   번거로워, 이 항목만 예외적으로 PowerShell 을 유지한다.
         cmd = [
-            "powershell", "-Command",
-            "Checkpoint-Computer -Description 'SmartOptimizer' -RestorePointType 'MODIFY_SETTINGS'"
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            "Checkpoint-Computer -Description 'OptiCore' -RestorePointType 'MODIFY_SETTINGS'"
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60,
+            creationflags=0x08000000 if IS_WINDOWS else 0,
+        )
         if result.returncode == 0:
             write_log("시스템 복구 지점 생성 성공")
             return True, "복구 지점을 생성했습니다."

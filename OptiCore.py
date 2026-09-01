@@ -124,6 +124,8 @@
      팝업을 띄우기 전에 동결된 프로세스를 먼저 해동한다.
    - 아이콘 로더는 기존 resource_path("icon.ico") + SP_ComputerIcon fallback
      구조를 그대로 유지(v2.0.0에서 이미 요구사항을 충족).
+   - 작업 표시줄 아이콘 고유화: Windows AppUserModelID를 등록해 작업 표시줄에서
+     파이썬 기본 아이콘이 아닌 OptiCore 전용 아이콘이 고정 표시되도록 보장.
 
    [7. DTO 분리 및 스레드 자원 관리]
    - models.py 신설: ProcessInfo / SystemStats / TweakProfile / TweakResult /
@@ -349,7 +351,9 @@
 =====================================================================
 """
 
+import os
 import sys
+import ctypes
 import traceback
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -450,6 +454,16 @@ def install_global_excepthook(window_getter):
 
 
 def main():
+    # ---- Windows 작업 표시줄 전용 아이콘 ID 등록 (AppUserModelID) ----
+    # 윈도우가 파이썬 기본 프로세스로 인식하여 작업 표시줄 아이콘을 기본 창 아이콘으로
+    # 되돌리는 문제를 방지하고 OptiCore 고유 아이콘이 표시되도록 명시적 ID를 설정한다.
+    if IS_WINDOWS:
+        try:
+            myappid = f"JeulGemI.OptiCore.App.{config.APP_VERSION}"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
     # ---- 진입점 정보 등록 ----
     # 모듈이 분리되면서 다른 모듈은 "OptiCore.py의 헤더 주석"과 "자기 자신의
     # 실제 경로"를 직접 알 수 없게 되었다. 그래서 가장 먼저 등록해준다.
@@ -468,8 +482,9 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName(config.APP_NAME)
 
-    # 프로그램 아이콘 (icon.ico 없으면 시스템 기본 아이콘으로 자동 대체)
-    app.setWindowIcon(load_app_icon())
+    # 프로그램 전체 창/작업 표시줄 아이콘 설정 (icon.ico 로드, 실패 시 SP_ComputerIcon 대체)
+    app_icon = load_app_icon()
+    app.setWindowIcon(app_icon)
 
     startup_settings = load_settings()
     apply_theme(startup_settings.get("theme", DEFAULT_THEME_KEY))
@@ -482,6 +497,7 @@ def main():
         )
 
     window = MainWindow()
+    window.setWindowIcon(app_icon)  # 개별 창 단위 아이콘 명시적 고정
     # 예외 처리기는 창이 만들어진 뒤에 건다 (정리 대상이 존재해야 하므로).
     install_global_excepthook(lambda: window)
     window.show()
